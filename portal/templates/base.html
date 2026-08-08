@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/static/checker.css">
   <link rel="stylesheet" href="/static/agent-logs.css">
   <link rel="stylesheet" href="/static/certificates.css">
+  <link rel="stylesheet" href="/static/navigation.css">
   <script defer src="/static/onboarding.js"></script>
 </head>
 <body>
@@ -19,7 +20,7 @@
   <a class="brand" href="/" title="Recovery, Archiving, Verification, Events &amp; Notification"><span class="brand-mark">R</span><span>RAVEN</span></a>
   <nav>
     <a href="/">Übersicht</a><a href="/checker">Checker</a><a href="/manual">Handbuch</a>
-    <a href="/policies">Policies</a>{% if user.role == 'admin' %}<a href="/processes">Prozesse</a><a href="/settings/application">Konfiguration</a><a href="/settings/smtp">SMTP</a><a href="/certificates">Zertifikate</a><a href="/explorer">Explorer</a><a href="/clients/new">Server onboarden</a><a href="/users">Benutzer</a>{% endif %}
+    <a href="/policies">Policies</a>{% if user.role == 'admin' %}<details class="nav-menu"><summary>Administration</summary><div class="nav-menu-panel"><a href="/processes">Prozesse</a><a href="/settings/application">Konfiguration</a><a href="/settings/smtp">SMTP</a><a href="/certificates">Zertifikate</a><a href="/explorer">Explorer</a><a href="/clients/new">Server onboarden</a><a href="/users">Benutzer</a></div></details>{% endif %}
     <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link-button">Abmelden</button></form>
   </nav>
 </header>

@@ -1,0 +1,35 @@
+.nav-menu {
+  position: relative;
+  color: #cfe0e7;
+}
+
+.nav-menu summary {
+  cursor: pointer;
+  padding: 8px 0;
+  list-style: none;
+}
+
+.nav-menu summary::-webkit-details-marker { display: none; }
+.nav-menu summary::after { content: " ▾"; font-size: 11px; }
+.nav-menu[open] summary, .nav-menu summary:hover { color: #fff; }
+
+.nav-menu-panel {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  top: 42px;
+  display: grid;
+  min-width: 220px;
+  padding: 10px;
+  background: var(--nav);
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 11px;
+  box-shadow: 0 14px 35px rgba(0,0,0,.28);
+}
+
+.topbar .nav-menu-panel a { padding: 9px 12px; border-radius: 7px; }
+.topbar .nav-menu-panel a:hover { background: rgba(255,255,255,.08); }
+
+@media (max-width: 850px) {
+  .nav-menu-panel { right: auto; left: 0; }
+}
