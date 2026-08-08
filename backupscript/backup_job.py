@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import hashlib
 import html
 import json
 import logging
@@ -19,7 +20,7 @@ import time
 import traceback
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ except ModuleNotFoundError:  # Python 3.10 on supported older Ubuntu releases
 
 
 SYSTEM_DATABASES = {"information_schema", "performance_schema", "mysql", "sys"}
+DEFAULT_STATE_PATH = "/var/lib/raven-backup/agent-state.json"
+DEFAULT_INTERVAL_HOURS = 24
 LOG = logging.getLogger("raven-backup")
 CURRENT_PHASE = "startup"
 CURRENT_RUN_ID: str | None = None
@@ -63,6 +66,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll", action="store_true", help="Zentralen Backup-Auftrag abfragen und gegebenenfalls ausfuehren")
     parser.add_argument("--test-email", action="store_true")
     parser.add_argument("--notify-success", action="store_true", help="Erfolgsmail fuer diesen Lauf erzwingen")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Backup auch dann ausfuehren, wenn das Intervall der Policy noch nicht abgelaufen ist",
+    )
     return parser.parse_args()
 
 
@@ -407,18 +415,34 @@ def apply_config_update(cfg: dict[str, Any], config_path: str, update: dict[str,
         raise RuntimeError("Portal lieferte eine ungueltige Agent-Konfiguration") from exc
     if int(parsed.get("backup", {}).get("config_version", -1)) != expected_version:
         raise RuntimeError("Versionsnummer der Portal-Konfiguration ist inkonsistent")
-    path = Path(config_path)
+    write_private_file(Path(config_path), decoded, 0o600)
+    cfg.clear()
+    cfg.update(parsed)
+    LOG.info("Agent-Konfiguration auf Portal-Version %s aktualisiert", expected_version)
+
+
+def script_path() -> Path:
+    return Path(__file__).resolve()
+
+
+def script_digest() -> str:
+    return hashlib.sha256(script_path().read_bytes()).hexdigest()
+
+
+def write_private_file(path: Path, payload: bytes, mode: int) -> None:
+    """Replace a file atomically without ever following a symlink."""
     if path.is_symlink():
-        raise RuntimeError(f"Agent-Konfiguration darf kein Symlink sein: {path}")
+        raise RuntimeError(f"Datei darf kein Symlink sein: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(f".{path.name}.raven-{os.getpid()}.tmp")
     descriptor = os.open(
         temporary,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
+        mode,
     )
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            handle.write(decoded)
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -427,12 +451,110 @@ def apply_config_update(cfg: dict[str, Any], config_path: str, update: dict[str,
             temporary.unlink()
         except FileNotFoundError:
             pass
-    cfg.clear()
-    cfg.update(parsed)
-    LOG.info("Agent-Konfiguration auf Portal-Version %s aktualisiert", expected_version)
 
 
-def poll_for_command(cfg: dict[str, Any], config_path: str) -> dict[str, Any] | None:
+def apply_script_update(update: dict[str, Any]) -> None:
+    """Store a newer agent script; the next scheduled run executes it."""
+    try:
+        expected_digest = str(update["sha256"]).strip().lower()
+        decoded = base64.b64decode(str(update["content_b64"]), validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Portal lieferte ein ungueltiges Agent-Skript") from exc
+    if hashlib.sha256(decoded).hexdigest() != expected_digest:
+        raise RuntimeError("Pruefsumme des ausgelieferten Agent-Skripts stimmt nicht")
+    if not decoded.startswith(b"#!"):
+        raise RuntimeError("Ausgeliefertes Agent-Skript hat keinen Interpreter-Header")
+    write_private_file(script_path(), decoded, 0o700)
+    LOG.info("Agent-Skript auf Portal-Version %s aktualisiert; gilt ab dem naechsten Lauf", expected_digest[:12])
+
+
+def state_file(cfg: dict[str, Any]) -> Path:
+    return Path(str(cfg.get("backup", {}).get("state_path", DEFAULT_STATE_PATH)))
+
+
+def load_agent_state(cfg: dict[str, Any]) -> dict[str, Any]:
+    try:
+        state = json.loads(state_file(cfg).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def record_successful_backup(cfg: dict[str, Any], report: dict[str, Any]) -> None:
+    """Remember the last success locally so the agent can judge the interval itself."""
+    state = load_agent_state(cfg)
+    state.update(
+        {
+            "last_success_at": str(report.get("finished_at") or datetime.now().astimezone().isoformat()),
+            "last_run_id": str(report.get("run_id", "")),
+            "policy_id": report.get("policy", {}).get("id"),
+        }
+    )
+    try:
+        write_private_file(state_file(cfg), json.dumps(state, ensure_ascii=False).encode("utf-8"), 0o600)
+    except (OSError, RuntimeError) as exc:
+        LOG.warning("Lokaler Backup-Zustand konnte nicht gespeichert werden: %s", exc)
+
+
+def parsed_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.astimezone()
+
+
+def last_known_success(cfg: dict[str, Any], portal_schedule: dict[str, Any] | None) -> datetime | None:
+    """Return the most recent successful backup known locally or reported by the portal."""
+    candidates = [parsed_time(load_agent_state(cfg).get("last_success_at"))]
+    if portal_schedule:
+        candidates.append(parsed_time(portal_schedule.get("last_success_at")))
+    known = [item for item in candidates if item]
+    return max(known) if known else None
+
+
+def interval_hours(cfg: dict[str, Any], portal_schedule: dict[str, Any] | None) -> int:
+    source = portal_schedule if portal_schedule else cfg.get("schedule", {})
+    try:
+        hours = int(source.get("interval_hours", DEFAULT_INTERVAL_HOURS))
+    except (TypeError, ValueError):
+        hours = DEFAULT_INTERVAL_HOURS
+    return hours if hours > 0 else DEFAULT_INTERVAL_HOURS
+
+
+def backup_due(cfg: dict[str, Any], portal_schedule: dict[str, Any] | None) -> tuple[bool, str]:
+    """Decide whether the configured interval has elapsed since the last success.
+
+    The portal delivers the currently open slot with every poll, so a changed
+    policy takes effect immediately. Without a portal answer the agent falls
+    back to the interval of its own configuration.
+    """
+    last_success = last_known_success(cfg, portal_schedule)
+    hours = interval_hours(cfg, portal_schedule)
+    if last_success is None:
+        return True, "noch kein erfolgreiches Backup vorhanden"
+    current_slot = parsed_time((portal_schedule or {}).get("current_slot"))
+    if current_slot is None:
+        current_slot = datetime.now().astimezone() - timedelta(hours=hours)
+        if last_success > current_slot:
+            return False, (
+                f"letztes erfolgreiches Backup {last_success.isoformat()} liegt weniger als "
+                f"{hours} Stunden zurueck"
+            )
+        return True, f"letztes erfolgreiches Backup {last_success.isoformat()} ist aelter als {hours} Stunden"
+    if last_success >= current_slot:
+        next_due = (portal_schedule or {}).get("next_slot") or "unbekannt"
+        return False, (
+            f"Termin {current_slot.isoformat()} ist durch das Backup vom {last_success.isoformat()} "
+            f"bereits erfuellt; naechster Termin {next_due}"
+        )
+    return True, f"Termin {current_slot.isoformat()} ist offen"
+
+
+def poll_portal(cfg: dict[str, Any], config_path: str) -> dict[str, Any]:
+    """Ask the portal for the live schedule, pending orders and agent updates."""
     status_cfg = cfg.get("status", {})
     if not bool(status_cfg.get("enabled", False)):
         raise RuntimeError("Zentrale Steuerung ist in [status] deaktiviert")
@@ -445,13 +567,19 @@ def poll_for_command(cfg: dict[str, Any], config_path: str) -> dict[str, Any] | 
             "time": datetime.now(timezone.utc).isoformat(),
             "config_version": int(cfg["backup"].get("config_version", 0)),
             "mariadb_available": bool(cfg["backup"].get("mariadb_available", False)),
+            "script_sha256": script_digest(),
         },
     )
     if isinstance(result.get("config_update"), dict):
         apply_config_update(cfg, config_path, result["config_update"])
-    if result.get("action") == "none":
-        return None
-    if result.get("action") != "backup" or not isinstance(result.get("command_id"), int):
+    if isinstance(result.get("script_update"), dict):
+        try:
+            apply_script_update(result["script_update"])
+        except (OSError, RuntimeError) as exc:
+            LOG.warning("Agent-Skript konnte nicht aktualisiert werden: %s", exc)
+    if result.get("action") not in {"none", "backup"}:
+        raise RuntimeError("Portal lieferte eine unbekannte Anweisung")
+    if result.get("action") == "backup" and not isinstance(result.get("command_id"), int):
         raise RuntimeError("Portal lieferte einen ungueltigen Backup-Auftrag")
     return result
 
@@ -974,6 +1102,7 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
     write_remote_json(cfg, f"{run_dir}/manifest.json", report)
     append_remote_log(cfg, f"{run_dir}/backup.log", report)
     write_remote_json(cfg, f"{run_dir}/.backup-ok", report)
+    record_successful_backup(cfg, report)
     post_status(cfg, "success", report)
     LOG.info(
         "BACKUP OK: run=%s duration=%.3fs volume=%s",
@@ -1081,19 +1210,28 @@ def main() -> int:
             return 0 if args.poll else 3
         if args.poll:
             try:
-                command = poll_for_command(cfg, args.config)
+                result = poll_portal(cfg, args.config)
             except Exception as exc:
                 LOG.error("Portal-Polling fehlgeschlagen: %s", exc)
                 return 2
-            if command is None:
+            portal_schedule = result.get("schedule") if isinstance(result.get("schedule"), dict) else None
+            if result.get("action") != "backup":
                 return 0
+            command = result
             CURRENT_COMMAND_ID = int(command["command_id"])
+            forced = args.force or bool(command.get("force"))
+            due, reason = backup_due(cfg, portal_schedule)
+            if not due and not forced:
+                LOG.info("Backup-Auftrag %s abgelehnt: %s", CURRENT_COMMAND_ID, reason)
+                post_command_state(cfg, CURRENT_COMMAND_ID, "skipped", message=f"Intervall nicht abgelaufen: {reason}")
+                return 0
             apply_command_policy(cfg, command)
             LOG.info(
-                "Zentralen Backup-Auftrag %s uebernommen (Grund: %s, Policy: %s)",
+                "Zentralen Backup-Auftrag %s uebernommen (Grund: %s, Policy: %s, %s)",
                 CURRENT_COMMAND_ID,
                 command.get("reason", "unbekannt"),
                 cfg["backup"].get("policy_name", "Legacy"),
+                "erzwungen" if forced and not due else reason,
             )
             post_command_state(
                 cfg,
@@ -1112,6 +1250,10 @@ def main() -> int:
                 run_id=str(report["run_id"]),
                 message=f"Backup erfolgreich, Volumen {format_size(int(report['logical_run_bytes']))}",
             )
+            return 0
+        due, reason = backup_due(cfg, None)
+        if not due and not args.force:
+            LOG.info("Backup uebersprungen: %s; mit --force laesst es sich trotzdem starten", reason)
             return 0
         attempted = True
         ATTEMPT_STARTED_AT = datetime.now(timezone.utc).isoformat()

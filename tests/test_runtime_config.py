@@ -23,6 +23,7 @@ class RuntimeConfigTests(unittest.TestCase):
                 "deployment_token_minutes": 15,
                 "default_schedule_hour": 2,
                 "default_schedule_minute": 0,
+                "default_interval_hours": 24,
                 "min_remote_free_bytes": 1024,
                 "database_split_threshold_bytes": 512,
             },
@@ -43,11 +44,12 @@ class RuntimeConfigTests(unittest.TestCase):
                 "pending_domain_tld TEXT,pending_domain_subdomain TEXT,domain_change_pending INTEGER,"
                 "username_prefix TEXT,backup_ssh_port INTEGER,remote_hostname TEXT,"
                 "deployment_token_minutes INTEGER,default_schedule_hour INTEGER,default_schedule_minute INTEGER,"
+                "default_interval_hours INTEGER,"
                 "min_remote_free_bytes INTEGER,database_split_threshold_bytes INTEGER)"
             )
             connection.execute(
                 "INSERT INTO portal_settings VALUES(1,'example.net','raven','example.org','next',1,"
-                "'raven_',49222,'archive',30,3,15,2048,1024)"
+                "'raven_',49222,'archive',30,3,15,12,2048,1024)"
             )
             connection.commit()
             connection.close()

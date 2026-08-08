@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Deployment-Token · RAVEN{% endblock %}
 {% block content %}
-<ol class="onboarding-steps"><li class="done"><span>1</span><strong>Zielkonto</strong><small>{{ client.username }}</small></li><li class="active"><span>2</span><strong>Deployment</strong><small>Curl ausführen</small></li><li><span>3</span><strong>Prüfung</strong><small>Ergebnis kontrollieren</small></li></ol>
 <div class="page-head"><div><p class="eyebrow">Schritt 2 von 3</p><h1>{{ client.slug }} onboarden</h1><p class="muted">Der aktuelle Befehl kann bis zur Nutzung oder bis {{ expires_at or ('in ' ~ minutes ~ ' Minuten') }} erneut über diese Seite aufgerufen werden.</p></div></div>
+<ol class="onboarding-steps"><li class="done"><span>1</span><strong>Zielkonto</strong><small>{{ client.username }}</small></li><li class="active"><span>2</span><strong>Deployment</strong><small>Curl ausführen</small></li><li><span>3</span><strong>Prüfung</strong><small>Ergebnis kontrollieren</small></li></ol>
 {% if command %}
 <section class="panel token-panel">
   <div class="alert warning"><strong>Sensibler Einmal-Befehl.</strong> Nur als root auf dem vorgesehenen Quellserver ausführen. Das Token ist verschlüsselt gespeichert und wird nach erfolgreicher Registrierung ungültig.</div>

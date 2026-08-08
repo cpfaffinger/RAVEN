@@ -8,6 +8,7 @@
 
 .deploy-panel h2 { margin: .15rem 0 .35rem; }
 .deploy-panel p { margin: 0; }
+.panel > .deploy-panel { margin-bottom: 0; }
 
 .inline-check {
   display: flex;
@@ -124,25 +125,29 @@
 .control-facts .online { color: var(--good); }
 .control-facts .offline { color: var(--warn); }
 .status.queued, .status.claimed { background: #e7eef8; color: #315d91; }
-.status.satisfied { background: #edf2f4; color: #526772; }
+.status.satisfied, .status.skipped { background: #edf2f4; color: #526772; }
+.control-panel .force-option { display: flex; align-items: center; gap: .45rem; font-size: 12px; margin-bottom: .6rem; }
+.control-panel .force-option input { width: auto; }
 
 @media (max-width: 900px) {
   .control-panel { grid-template-columns: 1fr; }
 }
 
-.policy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.policy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
 .policy-card { display: grid; grid-template-columns: 1fr auto; gap: .75rem; color: inherit; text-decoration: none; margin: 0; }
 .policy-card .status { align-self: start; justify-self: end; }
 .policy-card small { color: var(--muted); }
-.policy-create { display: grid; grid-template-columns: auto 1fr 1.5fr auto auto; gap: 1rem; align-items: end; }
-.policy-create > .checks { margin: 0; display: grid; gap: .55rem; }
-.database-options { margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fbfc; }
-.database-options h2 { margin: .15rem 0 .25rem; }
-.database-options p { margin-top: 0; }
-.database-options .checks { margin: 1rem 0 0; display: grid; gap: .8rem; }
-.database-options .checks label { align-items: flex-start; }
-.database-options .checks small { display: block; }
-.policy-path-form { display: grid; grid-template-columns: auto 1fr 1fr 1.5fr auto; gap: 1rem; align-items: end; }
+.time-inputs { display: flex; gap: .4rem; align-items: center; }
+.time-inputs input { min-width: 0; }
+.form-section-head { margin: .35rem 0 -.35rem; }
+.form-section-head h3 { margin: .1rem 0 0; font-size: 15px; }
+.form-block { margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fbfc; }
+.form-block h2 { margin: .15rem 0 .25rem; }
+.form-block p { margin-top: 0; }
+.form-block .checks { margin: 1rem 0 0; display: grid; gap: .8rem; }
+.form-block .checks label { align-items: flex-start; flex-wrap: wrap; }
+.form-block .checks small { display: block; flex-basis: 100%; }
+.policy-path-form { display: grid; grid-template-columns: 1.5fr 1fr 1.5fr auto; gap: 1rem; align-items: end; }
 .policy-assign { display: grid; grid-template-columns: 1fr auto; gap: .6rem; align-items: end; margin-top: 1rem; }
 .policy-path-summary { display: grid; gap: .6rem; margin-top: 1rem; }
 .policy-path-summary > div { display: grid; grid-template-columns: minmax(150px,1fr) 1fr auto; gap: 1rem; align-items: center; padding: .75rem; border-top: 1px solid var(--line); }
@@ -153,7 +158,7 @@
 .server-chips { display: flex; flex-wrap: wrap; gap: .6rem; }
 .server-chips a { padding: .45rem .7rem; border-radius: 999px; background: #edf2f4; color: var(--ink); text-decoration: none; font-weight: 700; }
 .server-chips > span:not(.muted) { padding: .45rem .7rem; border-radius: 999px; background: #edf2f4; color: var(--ink); font-weight: 700; }
-.notification-form { display: grid; grid-template-columns: minmax(220px,1fr) auto auto; gap: .75rem; align-items: end; }
+.notification-form { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: .75rem; align-items: end; }
 .notification-toggle { display: flex; align-items: center; gap: .5rem; min-height: 43px; }
 .notification-toggle input { width: auto; }
 .notification-check { margin: 0; }
@@ -165,10 +170,10 @@
 
 @media (max-width: 1050px) {
   .policy-grid { grid-template-columns: 1fr 1fr; }
-  .policy-create, .policy-path-form { grid-template-columns: 1fr 1fr; }
+  .policy-path-form { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 650px) {
-  .policy-grid, .policy-create, .policy-path-form { grid-template-columns: 1fr; }
+  .policy-grid, .policy-path-form { grid-template-columns: 1fr; }
   .policy-path-summary > div { grid-template-columns: 1fr; }
   .danger-zone { align-items: stretch; flex-direction: column; }
   .notification-form { grid-template-columns: 1fr; }

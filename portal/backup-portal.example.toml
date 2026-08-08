@@ -43,6 +43,7 @@ remote_hostname = "backup"
 deployment_token_minutes = 15
 default_schedule_hour = 2
 default_schedule_minute = 0
+default_interval_hours = 24
 min_remote_free_bytes = 21474836480
 database_split_threshold_bytes = 2147483648
 

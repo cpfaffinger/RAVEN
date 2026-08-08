@@ -18,6 +18,7 @@ SETTING_COLUMNS = (
     "deployment_token_minutes",
     "default_schedule_hour",
     "default_schedule_minute",
+    "default_interval_hours",
     "min_remote_free_bytes",
     "database_split_threshold_bytes",
 )
@@ -35,6 +36,7 @@ def bootstrap_settings(config: dict[str, Any]) -> dict[str, Any]:
         "deployment_token_minutes": int(onboarding.get("deployment_token_minutes", 15)),
         "default_schedule_hour": int(onboarding.get("default_schedule_hour", 2)),
         "default_schedule_minute": int(onboarding.get("default_schedule_minute", 0)),
+        "default_interval_hours": int(onboarding.get("default_interval_hours", 24)),
         "min_remote_free_bytes": int(onboarding.get("min_remote_free_bytes", 20 * 1024**3)),
         "database_split_threshold_bytes": int(
             onboarding.get("database_split_threshold_bytes", 2 * 1024**3)
@@ -58,8 +60,10 @@ def database_settings(config: dict[str, Any]) -> dict[str, Any]:
         return {}
     if not row:
         return {}
-    values = {column: row[column] for column in SETTING_COLUMNS}
     keys = set(row.keys())
+    # Columns added by a later schema migration may be missing until the portal
+    # has started once; the TOML bootstrap value stays in effect until then.
+    values = {column: row[column] for column in SETTING_COLUMNS if column in keys}
     values["domain_change_pending"] = bool(row["domain_change_pending"]) if "domain_change_pending" in keys else False
     values["pending_domain_tld"] = str(row["pending_domain_tld"] or "") if "pending_domain_tld" in keys else ""
     values["pending_domain_subdomain"] = str(row["pending_domain_subdomain"] or "") if "pending_domain_subdomain" in keys else ""

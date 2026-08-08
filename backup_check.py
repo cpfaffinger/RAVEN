@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--check-smtp", action="store_true", help="SMTP-Anmeldung ohne Mailversand testen")
     parser.add_argument("--smtp-json-file", help="Root-only SMTP-Override aus dem Portal")
     parser.add_argument(
+        "--schedule-json-file",
+        help="Root-only Fristen je Backup-Benutzer aus dem Portal, abgeleitet aus dem Policy-Intervall",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Vollstaendigen Check ausfuehren und Ergebnis-Mail unabhaengig vom Alarmstatus senden",
@@ -65,17 +69,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config(path: str, smtp_json_file: str | None = None) -> dict[str, Any]:
+def read_json_override(path_value: str, description: str) -> dict[str, Any]:
+    override_path = Path(path_value)
+    if override_path.is_symlink() or override_path.stat().st_size > 64 * 1024:
+        raise ValueError(f"Ungueltige {description}")
+    payload = json.loads(override_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{description} muss ein JSON-Objekt sein")
+    return payload
+
+
+def load_config(
+    path: str, smtp_json_file: str | None = None, schedule_json_file: str | None = None
+) -> dict[str, Any]:
     with open(path, "rb") as handle:
         cfg = tomllib.load(handle)
     if smtp_json_file:
-        override_path = Path(smtp_json_file)
-        if override_path.is_symlink() or override_path.stat().st_size > 64 * 1024:
-            raise ValueError("Ungueltige SMTP-Override-Datei")
-        smtp_override = json.loads(override_path.read_text(encoding="utf-8"))
-        if not isinstance(smtp_override, dict):
-            raise ValueError("SMTP-Override muss ein JSON-Objekt sein")
-        cfg["smtp"] = smtp_override
+        cfg["smtp"] = read_json_override(smtp_json_file, "SMTP-Override-Datei")
+    if schedule_json_file:
+        # Deadlines follow the policy interval. An explicit entry in the TOML
+        # configuration stays a deliberate exception and keeps precedence.
+        portal_ages = read_json_override(schedule_json_file, "Zeitplan-Override-Datei")
+        monitor = cfg.setdefault("monitor", {})
+        merged = {str(user): float(hours) for user, hours in portal_ages.items()}
+        merged.update(dict(monitor.get("max_age_hours_by_user", {})))
+        monitor["max_age_hours_by_user"] = merged
     for section in ("monitor", "smtp", "alerts"):
         if section not in cfg:
             raise ValueError(f"Konfigurationsabschnitt [{section}] fehlt")
@@ -369,14 +387,17 @@ def evaluate(cfg: dict[str, Any], previous_state: dict[str, Any] | None = None) 
     marker_users = list(mon.get("require_ok_file_for_users", []))
     incomplete_grace_hours = float(mon.get("incomplete_grace_hours", 6))
     previous_users = (previous_state or {}).get("users", {})
+    age_overrides = mon.get("max_age_hours_by_user", {})
     now = local_now()
-    cutoff = now.timestamp() - max_age * 3600
+    # Mirrors are judged by SSH activity, so the journal window has to cover the
+    # longest deadline in play, not only the global default.
+    longest_age = max([max_age, *(float(value) for value in age_overrides.values())])
+    cutoff = now.timestamp() - longest_age * 3600
     ssh_latest = (
         ssh_activity(cutoff, str(mon.get("ssh_journal_unit", "ssh.service")))
         if mon.get("ssh_activity_for_mirrors", True)
         else {}
     )
-    age_overrides = mon.get("max_age_hours_by_user", {})
     results: list[Result] = []
 
     users = sorted(path for path in home_root.glob(user_glob) if path.is_dir())
@@ -713,7 +734,7 @@ def main() -> int:
     args = parse_args()
     CONFIG_DISPLAY = args.config
     try:
-        cfg = load_config(args.config, args.smtp_json_file)
+        cfg = load_config(args.config, args.smtp_json_file, args.schedule_json_file)
         alerts = cfg["alerts"]
         smtp_enabled = bool(cfg["smtp"].get("enabled", True))
         hostname = socket.gethostname()

@@ -124,6 +124,7 @@ require_project_files() {
         "portal/acme_manager.py"
         "portal/domain_config.py"
         "portal/runtime_config.py"
+        "portal/backup_schedule.py"
         "portal/backup-portal-cert-renew.service"
         "portal/backup-portal-cert-renew.timer"
         "portal/README.md"
@@ -824,6 +825,7 @@ remote_hostname = $(toml_quote "$BACKUP_TARGET_HOSTNAME")
 deployment_token_minutes = 15
 default_schedule_hour = 2
 default_schedule_minute = 0
+default_interval_hours = 24
 min_remote_free_bytes = 21474836480
 database_split_threshold_bytes = 2147483648
 
@@ -836,6 +838,7 @@ EOF
 [monitor]
 home_root = "/home"
 user_glob = "backup_*"
+# Fallback fuer Konten ohne Portal-Policy; sonst gilt das Intervall der Policy.
 max_age_hours = 36
 require_nonempty = true
 check_volume_change = true
@@ -911,6 +914,7 @@ install_application() {
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/README.md" "$APP_DIR/README.md"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/domain_config.py" "$APP_DIR/domain_config.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/runtime_config.py" "$APP_DIR/runtime_config.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/backup_schedule.py" "$APP_DIR/backup_schedule.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/assets/bootstrap_agent.py" "$APP_DIR/assets/bootstrap_agent.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/backupscript/backup_job.py" "$APP_DIR/assets/backup_job.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/backup_check.py" "$APP_DIR/checker/backup_check.py"

@@ -4,8 +4,10 @@
 <div class="page-head"><div><p class="eyebrow">Zugriffskontrolle</p><h1>Lokale Benutzer</h1><p class="muted">Portal-Zugriff und Mailbenachrichtigungen werden pro Benutzer verwaltet. Nur aktive Benutzer mit aktivierter Mailoption erhalten Berichte.</p></div></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 <section class="detail-grid users-grid">
-  <form method="post" action="/users" class="panel stack">
-    <h2>Benutzer anlegen</h2><input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <section class="panel">
+    <div class="panel-head"><h2>Benutzer anlegen</h2></div>
+    <form method="post" action="/users" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <label>Benutzername<input name="username" required></label>
     <label>Anzeigename<input name="display_name" required></label>
     <label>E-Mail-Adresse<input type="email" name="email" placeholder="name@example.com"></label>
@@ -13,8 +15,9 @@
     <label>Rolle<select name="role"><option value="viewer">Viewer</option><option value="admin">Administrator</option></select></label>
     <div class="checks notification-check"><label><input type="checkbox" name="receive_notifications"> Backup- und Checker-Mails erhalten</label></div>
     <button class="primary">Anlegen</button>
-  </form>
-  <section class="panel"><h2>Vorhandene Benutzer</h2>
+    </form>
+  </section>
+  <section class="panel"><div class="panel-head"><h2>Vorhandene Benutzer</h2><span class="muted">{{ users|length }}</span></div>
     {% for item in users %}<article class="user-row">
       <div><strong>{{ item.display_name }}</strong><small>{{ item.username }} · {{ item.role }} · {{ 'aktiv' if item.active else 'deaktiviert' }}</small></div>
       <form method="post" action="/users/{{ item.id }}/notifications" class="notification-form">

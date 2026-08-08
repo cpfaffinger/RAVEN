@@ -1,6 +1,7 @@
 [monitor]
 home_root = "/home"
 user_glob = "backup_*"
+# Fallback fuer Konten ohne Portal-Policy; sonst gilt das Intervall der Policy.
 max_age_hours = 36
 require_nonempty = true
 check_volume_change = true

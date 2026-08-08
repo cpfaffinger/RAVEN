@@ -8,11 +8,11 @@ Das Portal wird als root-privilegierter, gehärteter systemd-Dienst betrieben. R
 
 1. Als Portal-Administrator anmelden.
 2. Unter **Policies** das Sicherungsmodell anlegen: MariaDB-Datenbanken und MariaDB-Benutzer/Rechte können unabhängig aktiviert werden; Pfade werden als aktuelle `sync`-Kopie oder persistentes `tar.zst`-Archiv definiert.
-3. Unter **Neuen Server onboarden** den Client, genau eine Policy, Zeitplan sowie Mail- und Logging-Optionen anlegen.
+3. Unter **Neuen Server onboarden** den Client, genau eine Policy sowie Mail- und Logging-Optionen anlegen; Wunschzeit und Intervall stammen aus der Policy.
 4. In den Clientdetails „Ein-Befehl-Deployment“ auswählen und festlegen, ob direkt ein vollständiges Backup starten soll.
 5. Den angezeigten `curl`-Befehl als root auf genau diesem Quellserver ausführen.
 
-Der Bootstrap akzeptiert Debian und Ubuntu, prüft die benötigten Programme und installiert fehlende Backup-Abhängigkeiten idempotent über `apt-get` – insbesondere `zstd`, `rsync`, OpenSSH, `tar`, `cron`, CA-Zertifikate und gegebenenfalls `python3-tomli`. MariaDB selbst wird nicht installiert. Anschließend erzeugt er den privaten Ed25519-Schlüssel ausschließlich auf der Quelle, registriert nur den öffentlichen Schlüssel, installiert Agent und Konfiguration, verwaltet einen markierten SSH-/Cron-Block und führt Preflight plus Portal-Heartbeat aus. Ist die Sofortstart-Option aktiv, läuft anschließend im selben Curl-Aufruf das vollständige Backup. Danach pollt der Agent minütlich die zentrale Queue; Tageszeitplan und manuelle Trigger werden vom Portal gesteuert. Ein interner Agent-Lock verhindert parallele Läufe.
+Der Bootstrap akzeptiert Debian und Ubuntu, prüft die benötigten Programme und installiert fehlende Backup-Abhängigkeiten idempotent über `apt-get` – insbesondere `zstd`, `rsync`, OpenSSH, `tar`, `cron`, CA-Zertifikate und gegebenenfalls `python3-tomli`. MariaDB selbst wird nicht installiert. Anschließend erzeugt er den privaten Ed25519-Schlüssel ausschließlich auf der Quelle, registriert nur den öffentlichen Schlüssel, installiert Agent und Konfiguration, verwaltet einen markierten SSH-/Cron-Block und führt Preflight plus Portal-Heartbeat aus. Ist die Sofortstart-Option aktiv, läuft anschließend im selben Curl-Aufruf das vollständige Backup. Danach pollt der Agent minütlich die zentrale Queue; Wunschzeit, Intervall und manuelle Trigger werden vom Portal gesteuert. Ein interner Agent-Lock verhindert parallele Läufe.
 
 Die beim Queuen gültige Policy wird unveränderlich im Auftrag gespeichert. Policy-Änderungen wirken deshalb nur auf neu gequeuete Backups. Ein Client kann immer nur genau einer Policy zugeordnet sein.
 

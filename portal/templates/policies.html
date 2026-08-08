@@ -1,8 +1,28 @@
 {% extends "base.html" %}
 {% block title %}Backup-Policies · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Konfigurationsmodelle</p><h1>Backup-Policies</h1><p class="muted">Persistente Sicherungen werden ausschließlich als Zstandard-Archive geschrieben. Nur Current Sync bleibt als direkt nutzbarer Spiegel bestehen.</p></div></div>
+<div class="page-head"><div><p class="eyebrow">Konfigurationsmodelle</p><h1>Backup-Policies</h1><p class="muted">Eine Policy bestimmt Zeitplan, Datenbankumfang und Ordnerregeln aller ihr zugewiesenen Server. Persistente Sicherungen werden ausschließlich als Zstandard-Archive geschrieben; nur Current Sync bleibt ein direkt nutzbarer Spiegel.</p></div></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
-{% if user.role == 'admin' %}<form method="post" action="/policies" class="panel policy-create"><input type="hidden" name="csrf_token" value="{{ csrf }}"><div><p class="eyebrow">Neue Policy</p><h2>Modell anlegen</h2></div><label>Name<input name="name" minlength="3" maxlength="80" required placeholder="Webserver Standard"></label><label>Beschreibung<input name="description" maxlength="1000" placeholder="Zweck und Aufbewahrungsmodell"></label><div class="checks"><label><input type="checkbox" name="mariadb_databases_enabled" checked> MariaDB-Datenbanken: Schemas und Daten</label><label><input type="checkbox" name="mariadb_users_enabled" checked> MariaDB-Benutzer und Rechte</label></div><button class="primary">Policy anlegen</button></form>{% endif %}
-<section class="policy-grid">{% for policy in policies %}<a class="panel policy-card" href="/policies/{{ policy.id }}"><div><p class="eyebrow">{{ policy.client_count }} Server · {{ policy.path_count }} Pfade</p><h2>{{ policy.name }}</h2><p class="muted">{{ policy.description or 'Keine Beschreibung' }}</p></div><span class="status {{ 'ok' if policy.active else 'stale' }}">{{ 'AKTIV' if policy.active else 'INAKTIV' }}</span><small>Datenbanken {{ 'aktiv' if policy.mariadb_databases_enabled else 'aus' }} · Benutzer/Rechte {{ 'aktiv' if policy.mariadb_users_enabled else 'aus' }}</small></a>{% else %}<div class="panel empty">Noch keine Policies vorhanden.</div>{% endfor %}</section>
+{% if user.role == 'admin' %}
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Neue Policy</p><h2>Modell anlegen</h2></div><span class="muted">Der Zeitplan gilt für alle zugewiesenen Server</span></div>
+  <form method="post" action="/policies" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="form-grid">
+      <label>Name<input name="name" minlength="3" maxlength="80" required placeholder="Webserver Standard"></label>
+      <label>Beschreibung<input name="description" maxlength="1000" placeholder="Zweck und Aufbewahrungsmodell"></label>
+    </div>
+    <div class="form-grid">
+      <label>Wunschzeit<small>Anker des Zeitplans, Stunde und Minute</small><span class="time-inputs"><input type="number" name="schedule_hour" min="0" max="23" value="{{ defaults.default_schedule_hour }}" required aria-label="Stunde"><input type="number" name="schedule_minute" min="0" max="59" value="{{ defaults.default_schedule_minute }}" required aria-label="Minute"></span></label>
+      <label>Backup-Intervall<small>Abstand zwischen zwei fälligen Backups</small><select name="interval_hours">{% for choice in interval_choices %}<option value="{{ choice }}" {% if choice == defaults.default_interval_hours %}selected{% endif %}>{% if choice < 24 %}alle {{ choice }} Stunden{% elif choice == 24 %}alle 24 Stunden (täglich){% else %}alle {{ choice }} Stunden ({{ (choice / 24)|int }} Tage){% endif %}</option>{% endfor %}</select></label>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" name="mariadb_databases_enabled" checked> MariaDB-Datenbanken: Schemas und Daten</label>
+      <label><input type="checkbox" name="mariadb_users_enabled" checked> MariaDB-Benutzer und Rechte</label>
+    </div>
+    <div class="actions"><button class="primary">Policy anlegen</button></div>
+  </form>
+</section>
+{% endif %}
+<section class="policy-grid">{% for policy in policies %}<a class="panel policy-card" href="/policies/{{ policy.id }}"><div><p class="eyebrow">{{ policy.client_count }} Server · {{ policy.path_count }} Pfade</p><h2>{{ policy.name }}</h2><p class="muted">{{ policy.description or 'Keine Beschreibung' }}</p></div><span class="status {{ 'ok' if policy.active else 'stale' }}">{{ 'AKTIV' if policy.active else 'INAKTIV' }}</span><small>{{ schedules[policy.id] }} · Datenbanken {{ 'aktiv' if policy.mariadb_databases_enabled else 'aus' }} · Benutzer/Rechte {{ 'aktiv' if policy.mariadb_users_enabled else 'aus' }}</small></a>{% else %}<div class="panel empty">Noch keine Policies vorhanden.</div>{% endfor %}</section>
 {% endblock %}

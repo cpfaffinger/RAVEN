@@ -7,6 +7,7 @@ RAVEN verbindet ein TLS-geschütztes Verwaltungsportal mit einem schlanken Pytho
 ## Funktionen
 
 - Policy-basierte Sicherung von Dateisystempfaden als Current Sync oder persistentes `tar.zst`
+- zentral gepflegte Wunschzeit und Backup-Intervall je Policy, die der Agent bei jedem Abruf live übernimmt
 - MariaDB-Dumps einschließlich optionaler Benutzer und Rechte
 - zentrales Scheduling, Laufstatus, Protokolle, Volumenvergleich, Rotation und Speicherwarnungen
 - Backup Explorer für Verzeichnisse, Zstandard-Archive und einzelne Downloads
@@ -143,7 +144,7 @@ curl --fail https://backup.example.com:49180/readyz
 Danach im Browser `https://<Portal-Hostname>:<HTTPS-Port>` öffnen und mit dem während der Installation angelegten Admin anmelden. Die sinnvolle Reihenfolge im Portal ist:
 
 1. Unter **Policies** eine Backup-Policy anlegen oder die Standard-Policy prüfen.
-2. Unter **Neuen Server onboarden** Quelle, Policy, Zeitplan, Logging und Mailverhalten festlegen.
+2. Unter **Neuen Server onboarden** Quelle, Policy, Logging und Mailverhalten festlegen; Wunschzeit und Intervall kommen aus der Policy.
 3. In den Clientdetails ein Deployment-Token erzeugen.
 4. Den angezeigten Curl-Befehl einmalig als `root` auf dem Quellserver ausführen.
 5. Agent-Readiness, ersten Portal-Poll und später das Ergebnis des geplanten Backups im Dashboard kontrollieren.
@@ -200,6 +201,24 @@ Für DNS-Zonen außerhalb von Cloudflare bleibt `letsencrypt-dns-manual` verfüg
 systemctl status backup-portal-cert-renew.timer
 journalctl -u backup-portal-cert-renew.service
 ```
+
+## Backupzeit und Intervall
+
+Wunschzeit und Intervall gehören zur Backup-Policy und gelten damit für alle Server, die diese Policy verwenden. Unter **Policies** werden Stunde, Minute und Intervall gesetzt, unter **Konfiguration** die Vorbelegung für neu angelegte Policies.
+
+Die Wunschzeit ist der Anker des Musters. Bei 24 Stunden ist genau ein Backup pro Tag zu dieser Uhrzeit fällig, bei sechs Stunden zusätzlich alle sechs Stunden ab diesem Anker. Erlaubt sind ausschließlich Teiler von 24 Stunden und ganze Vielfache von 24 Stunden bis zu einer Woche; damit bleibt der Anker über Tagesgrenzen hinweg stabil.
+
+Der zentrale Scheduler queued einen Auftrag, sobald der laufende Termin offen ist, also seit dem Termin noch kein erfolgreiches Backup vorliegt. Der Agent prüft dieselbe Regel anschließend selbst:
+
+- Bei jedem Poll liefert das Portal Wunschzeit, Intervall, den laufenden Termin und den Zeitpunkt des letzten Erfolgs mit. Eine geänderte Policy wirkt deshalb ab dem nächsten Abruf, ohne dass ein Client neu ausgerollt werden muss.
+- Der Agent vergleicht das Portalergebnis mit seinem lokalen Zustand unter `/var/lib/raven-backup/` und lehnt einen Auftrag ab, solange der Termin bereits durch ein erfolgreiches Backup erfüllt ist. Der Auftrag erscheint dann als `SKIPPED`.
+- Nur ein ausdrücklich erzwungener Auftrag umgeht die Prüfung: das Kontrollkästchen **Intervall ignorieren (Force)** in den Clientdetails oder `--force` beim direkten Aufruf des Agenten.
+
+Auch das Agent-Skript selbst wird über denselben Kanal aktuell gehalten: Der Agent meldet die Prüfsumme seiner Datei, und das Portal liefert bei Abweichung die aktuelle Fassung aus. Sie wird geprüft, atomar geschrieben und ab dem folgenden Lauf verwendet.
+
+Diese Selbstaktualisierung kann erst greifen, wenn auf der Quelle einmal ein Agent mit dieser Fähigkeit liegt. Quellserver, die noch mit einer älteren Fassung onboarded wurden, brauchen daher genau einmal ein erneutes Deployment über den Curl-Befehl; danach kommen weitere Agentversionen automatisch. Bis dahin bleibt der Zeitplan trotzdem wirksam, weil bereits der zentrale Scheduler nur zum fälligen Termin einen Auftrag erzeugt – die zusätzliche Prüfung auf dem Client fehlt lediglich.
+
+Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem Anderthalbfachen des Intervalls, für den Tagesplan also weiterhin nach 36 Stunden. Ein Eintrag unter `max_age_hours_by_user` in `backup-check.toml` bleibt eine bewusste manuelle Ausnahme und hat Vorrang.
 
 ### Updates und Wiederherstellung
 

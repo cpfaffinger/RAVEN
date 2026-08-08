@@ -4,13 +4,19 @@
 <div class="page-head"><div><p class="eyebrow">Zentrale SQLite-Konfiguration</p><h1>Portal &amp; Onboarding</h1><p class="muted">Öffentliche Adresse und Agent-Defaults werden zentral verwaltet. Listener, TLS-Dateipfade und Master-Secret bleiben als bootkritische Werte in der root-only TOML.</p></div><span class="status success">DATENBANK AKTIV</span></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 {% if settings.domain_change_pending %}<div class="callout"><strong>Domainwechsel vorgemerkt:</strong> {{ configured.fqdn }}. Fordere auf der Zertifikatsseite das passende Zertifikat an; RAVEN aktiviert die neue Domain erst nach erfolgreicher Ausstellung.</div>{% endif %}
-<form method="post" action="/settings/application" class="panel stack">
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Öffentliche Adresse und Agent-Bereitstellung</p><h2>Portal-Konfiguration</h2></div><span class="muted">Aktiv: {{ settings.public_base_url }}</span></div>
+  <form method="post" action="/settings/application" class="stack">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
-  <div class="panel-head"><div><p class="eyebrow">Öffentliche Adresse</p><h2>Domain</h2></div><span class="muted">Aktiv: {{ settings.public_base_url }}</span></div>
+  <div class="form-section-head"><p class="eyebrow">Öffentliche Adresse</p><h3>Domain</h3></div>
   <div class="form-grid"><label>Basisdomain (TLD)<small>Beispiel: pulseone.cloud</small><input name="domain_tld" value="{{ configured.domain_tld }}" required maxlength="253"></label><label>Subdomain<small>Optional, beispielsweise backup-prd</small><input name="domain_subdomain" value="{{ configured.domain_subdomain }}" maxlength="253"></label></div>
-  <div class="panel-head"><div><p class="eyebrow">Agent-Bereitstellung</p><h2>Onboarding</h2></div></div>
+  <div class="form-section-head"><p class="eyebrow">Agent-Bereitstellung</p><h3>Onboarding</h3></div>
   <div class="form-grid"><label>Systembenutzer-Präfix<input name="username_prefix" value="{{ settings.username_prefix }}" required maxlength="16" pattern="[a-z_][a-z0-9_-]{0,15}"></label><label>Backup-SSH-Port<input type="number" name="backup_ssh_port" min="1" max="65535" value="{{ settings.backup_ssh_port }}" required></label><label>SSH-Alias am Agent<input name="remote_hostname" value="{{ settings.remote_hostname }}" required maxlength="253"></label><label>Deployment-Token gültig (Minuten)<input type="number" name="deployment_token_minutes" min="5" max="1440" value="{{ settings.deployment_token_minutes }}" required></label></div>
-  <div class="form-grid"><label>Standard-Backupstunde<input type="number" name="default_schedule_hour" min="0" max="23" value="{{ settings.default_schedule_hour }}" required></label><label>Standard-Minute<input type="number" name="default_schedule_minute" min="0" max="59" value="{{ settings.default_schedule_minute }}" required></label><label>Mindestens freier Zielspeicher (GiB)<input type="number" name="min_remote_free_gib" min="0.25" max="1048576" step="0.01" value="{{ min_remote_free_gib }}" required></label><label>DB-Split-Schwelle (GiB)<input type="number" name="database_split_gib" min="0.01" max="1048576" step="0.01" value="{{ database_split_gib }}" required></label></div>
+  <div class="form-section-head"><p class="eyebrow">Vorbelegung für neue Backup-Policies</p><h3>Zeitplan</h3></div>
+  <div class="form-grid"><label>Standard-Wunschzeit<span class="time-inputs"><input type="number" name="default_schedule_hour" min="0" max="23" value="{{ settings.default_schedule_hour }}" required aria-label="Stunde"><input type="number" name="default_schedule_minute" min="0" max="59" value="{{ settings.default_schedule_minute }}" required aria-label="Minute"></span></label><label>Standard-Backupintervall<select name="default_interval_hours">{% for choice in interval_choices %}<option value="{{ choice }}" {% if choice == settings.default_interval_hours %}selected{% endif %}>{% if choice < 24 %}alle {{ choice }} Stunden{% elif choice == 24 %}alle 24 Stunden (täglich){% else %}alle {{ choice }} Stunden ({{ (choice / 24)|int }} Tage){% endif %}</option>{% endfor %}</select></label></div>
+  <div class="form-section-head"><p class="eyebrow">Grenzwerte</p><h3>Speicher und Datenbanken</h3></div>
+  <div class="form-grid"><label>Mindestens freier Zielspeicher (GiB)<input type="number" name="min_remote_free_gib" min="0.25" max="1048576" step="0.01" value="{{ min_remote_free_gib }}" required></label><label>DB-Split-Schwelle (GiB)<input type="number" name="database_split_gib" min="0.01" max="1048576" step="0.01" value="{{ database_split_gib }}" required></label></div>
   <div class="actions"><button class="primary">Konfiguration speichern</button></div>
-</form>
+  </form>
+</section>
 {% endblock %}

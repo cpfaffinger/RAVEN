@@ -19,6 +19,7 @@ rsync_attempts = 3
 zstd_level = 3
 ssh_control_path = "/run/raven-backup-ssh-%C"
 local_lock_path = "/run/raven-backup-agent-example_web.lock"
+state_path = "/var/lib/raven-backup/agent-example_web.json"
 
 [[backup_paths]]
 source_path = "/etc"
@@ -29,6 +30,13 @@ mode = "tar"
 source_path = "/home"
 target_name = "home"
 mode = "tar"
+
+# Wunschzeit und Intervall der Policy. Das Portal liefert diese Werte bei jedem
+# Abruf erneut; die Angaben hier gelten fuer Laeufe ohne Portalkontakt.
+[schedule]
+hour = 2
+minute = 0
+interval_hours = 24
 
 [notifications]
 mail_on_success = true

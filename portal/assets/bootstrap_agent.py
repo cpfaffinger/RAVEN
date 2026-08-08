@@ -258,5 +258,8 @@ subprocess.run(["/usr/bin/python3", str(backup_path), "--config", str(config_pat
 print("Onboarding, Preflight und Portal-Heartbeat erfolgreich.")
 if result.get("run_initial_backup"):
     print("Initiales Backup wird gestartet ...")
-    subprocess.run(["/usr/bin/python3", str(backup_path), "--config", str(config_path)], check=True)
+    subprocess.run(
+        ["/usr/bin/python3", str(backup_path), "--config", str(config_path), "--force"],
+        check=True,
+    )
     print("Initiales Backup erfolgreich.")
