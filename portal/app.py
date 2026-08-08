@@ -454,6 +454,11 @@ def init_db() -> None:
                 connection.execute(
                     "UPDATE smtp_settings SET recipients_json='[]' WHERE id=1"
                 )
+                connection.execute(
+                    "UPDATE clients SET agent_config_version=agent_config_version+1,"
+                    "agent_config_updated_at=? WHERE active=1",
+                    (now_iso(),),
+                )
         cloudflare_defaults = ACME_CONFIG.get("cloudflare", {})
         if not isinstance(cloudflare_defaults, dict):
             cloudflare_defaults = {}
