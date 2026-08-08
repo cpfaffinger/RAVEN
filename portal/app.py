@@ -1845,7 +1845,11 @@ def policies_page(request: Request):
             "FROM backup_policies p LEFT JOIN clients c ON c.policy_id=p.id "
             "LEFT JOIN policy_paths pp ON pp.policy_id=p.id GROUP BY p.id ORDER BY p.name"
         ).fetchall()
-    return render(request, "policies.html", {"policies": policies})
+    return render(
+        request,
+        "policies.html",
+        {"policies": policies, "message": request.query_params.get("message", "")},
+    )
 
 
 @app.post("/policies")
@@ -1930,6 +1934,45 @@ def policy_update(
         raise HTTPException(409, "Policy-Name existiert bereits")
     audit(request, "policy.update", name, f"policy_id={policy_id}", user_id=user["id"])
     return RedirectResponse(f"/policies/{policy_id}", status_code=303)
+
+
+@app.post("/policies/{policy_id}/delete")
+def policy_delete(request: Request, policy_id: int, csrf_token: str = Form(...)):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    try:
+        with db() as connection:
+            # Lock writers before checking the assignment so a concurrent client
+            # update cannot attach the policy between the check and the delete.
+            connection.execute("BEGIN IMMEDIATE")
+            policy = connection.execute(
+                "SELECT name FROM backup_policies WHERE id=?", (policy_id,)
+            ).fetchone()
+            if not policy:
+                raise HTTPException(404)
+            client_count = connection.execute(
+                "SELECT COUNT(*) FROM clients WHERE policy_id=?", (policy_id,)
+            ).fetchone()[0]
+            if client_count:
+                raise HTTPException(
+                    409,
+                    "Policy wird noch von mindestens einem Server verwendet und kann nicht geloescht werden",
+                )
+            deleted = connection.execute(
+                "DELETE FROM backup_policies WHERE id=?", (policy_id,)
+            ).rowcount
+            if deleted != 1:
+                raise HTTPException(404)
+            policy_name = str(policy["name"])
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(
+            409,
+            "Policy wird noch verwendet und kann nicht geloescht werden",
+        ) from exc
+    audit(request, "policy.delete", policy_name, f"policy_id={policy_id}", user_id=user["id"])
+    return RedirectResponse(
+        f"/policies?message={quote('Backup-Policy wurde gelöscht')}", status_code=303
+    )
 
 
 @app.post("/policies/{policy_id}/paths")

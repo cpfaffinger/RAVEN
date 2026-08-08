@@ -151,6 +151,11 @@
 .mode-tar { background: #fff0d6; color: var(--warn); }
 .server-chips { display: flex; flex-wrap: wrap; gap: .6rem; }
 .server-chips a { padding: .45rem .7rem; border-radius: 999px; background: #edf2f4; color: var(--ink); text-decoration: none; font-weight: 700; }
+.danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 2rem; border-color: rgba(181,49,49,.35); }
+.danger-zone h2 { margin: .15rem 0 .25rem; }
+.danger-zone p { margin-bottom: 0; }
+.danger { background: var(--bad); border: 1px solid var(--bad); color: #fff; white-space: nowrap; }
+.danger:hover { background: #922828; }
 
 @media (max-width: 1050px) {
   .policy-grid { grid-template-columns: 1fr 1fr; }
@@ -159,4 +164,5 @@
 @media (max-width: 650px) {
   .policy-grid, .policy-create, .policy-path-form { grid-template-columns: 1fr; }
   .policy-path-summary > div { grid-template-columns: 1fr; }
+  .danger-zone { align-items: stretch; flex-direction: column; }
 }

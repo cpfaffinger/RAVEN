@@ -14,3 +14,8 @@ document.addEventListener("click", async (event) => {
     if (result) result.textContent = "Bitte den markierten Befehl manuell kopieren.";
   }
 });
+
+document.addEventListener("submit", (event) => {
+  const message = event.target.dataset.confirm;
+  if (message && !window.confirm(message)) event.preventDefault();
+});
