@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ client.slug }} · Backup Explorer{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">Backup Explorer</p><h1>{{ client.slug }}</h1><p class="muted">{{ total }} Einträge · Seite {{ page }} von {{ pages }}</p></div><a class="secondary button" href="/clients/{{ client.id }}">Serverdetails</a></div>
+<nav class="explorer-crumbs" aria-label="Pfad">{% for crumb in breadcrumbs %}<a href="/clients/{{ client.id }}/explorer?path={{ crumb.path|urlencode }}">{{ crumb.name }}</a>{% if not loop.last %}<span>/</span>{% endif %}{% endfor %}</nav>
+<section class="panel explorer-panel">
+  <div class="explorer-list explorer-head"><span>Name</span><span>Typ</span><span>Größe</span><span>Geändert</span><span>Aktion</span></div>
+  {% for entry in entries %}<div class="explorer-list">
+    <span class="explorer-name">{% if entry.is_dir %}<span class="file-icon folder">DIR</span><a href="/clients/{{ client.id }}/explorer?path={{ entry.path|urlencode }}">{{ entry.name }}</a>{% elif entry.is_archive %}<span class="file-icon archive">TAR</span><a href="/clients/{{ client.id }}/explorer/archive?path={{ entry.path|urlencode }}">{{ entry.name }}</a>{% else %}<span class="file-icon">FILE</span>{{ entry.name }}{% endif %}</span>
+    <span>{{ 'Ordner' if entry.is_dir else ('Archiv' if entry.is_archive else ('Symlink' if entry.is_link else 'Datei')) }}</span><span>{{ entry.size }}</span><span>{{ entry.modified }}</span>
+    <span>{% if entry.is_file %}<a class="download-link" href="/clients/{{ client.id }}/explorer/download?path={{ entry.path|urlencode }}">Herunterladen</a>{% else %}–{% endif %}</span>
+  </div>{% else %}<p class="empty">Dieses Verzeichnis ist leer.</p>{% endfor %}
+</section>
+{% if pages > 1 %}<nav class="explorer-pagination">{% if page > 1 %}<a class="secondary button" href="?path={{ relative|urlencode }}&page={{ page - 1 }}">← Zurück</a>{% endif %}<span>Seite {{ page }} / {{ pages }}</span>{% if page < pages %}<a class="secondary button" href="?path={{ relative|urlencode }}&page={{ page + 1 }}">Weiter →</a>{% endif %}</nav>{% endif %}
+{% endblock %}

@@ -1,0 +1,61 @@
+[backup]
+ssh_target = "backup"
+expected_source_hostname = "web01.example.com"
+expected_ssh_hostname = "backup.example.com"
+expected_ssh_user = "backup_example_web"
+expected_ssh_port = 49150
+expected_remote_hostname = "backup"
+expected_remote_home = "/home/backup_example_web"
+policy_id = 1
+policy_name = "Standard Zstd Archive"
+mariadb_available = true
+mariadb_enabled = true
+mariadb_databases_enabled = true
+mariadb_users_enabled = true
+min_remote_free_bytes = 21474836480
+database_split_threshold_bytes = 2147483648
+stream_attempts = 2
+rsync_attempts = 3
+zstd_level = 3
+ssh_control_path = "/run/raven-backup-ssh-%C"
+local_lock_path = "/run/raven-backup-agent-example_web.lock"
+
+[[backup_paths]]
+source_path = "/etc"
+target_name = "etc"
+mode = "tar"
+
+[[backup_paths]]
+source_path = "/home"
+target_name = "home"
+mode = "tar"
+
+[notifications]
+mail_on_success = true
+mail_on_failure = true
+
+[logging]
+level = "INFO"
+local_enabled = true
+portal_enabled = true
+include_traceback = true
+portal_max_bytes = 262144
+
+[status]
+enabled = true
+endpoint = "https://backup.example.com:49180/api/agent/status"
+poll_endpoint = "https://backup.example.com:49180/api/agent/poll"
+command_endpoint = "https://backup.example.com:49180/api/agent/commands"
+log_endpoint = "https://backup.example.com:49180/api/agent/logs"
+token = "AGENT_TOKEN"
+timeout_seconds = 15
+
+[smtp]
+host = "smtp.example.com"
+port = 25
+username = "backup-notification"
+password = "CHANGE_ME"
+from_address = "backup@example.com"
+to = ["admin@example.com"]
+starttls = false
+timeout_seconds = 20

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Server onboarden · RAVEN{% endblock %}
+{% block content %}
+<ol class="onboarding-steps"><li class="active"><span>1</span><strong>Server</strong><small>Konfiguration</small></li><li><span>2</span><strong>Deployment</strong><small>Curl-Befehl</small></li><li><span>3</span><strong>Prüfung</strong><small>Heartbeat & Backup</small></li></ol>
+<div class="page-head"><div><p class="eyebrow">Schritt 1 von 3</p><h1>Neuen Quellserver anlegen</h1><p class="muted">Zielkonto, Zeitplan, Benachrichtigungen und Logging für den neuen Backup-Agenten festlegen.</p></div></div>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<form method="post" action="/clients/new" class="panel form-panel">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <div class="form-grid">
+    <label>Server-Slug<small>z. B. example-web3</small><input name="slug" pattern="[a-z][a-z0-9_-]{1,23}" required></label>
+    <label>Erwarteter Hostname<small>Optional, wird beim Agentenlauf verifiziert</small><input name="source_hostname" placeholder="web3.example.com"></label>
+    <label>Backup-Stunde<input type="number" name="schedule_hour" min="0" max="23" value="{{ defaults.default_schedule_hour or 2 }}" required></label>
+    <label>Backup-Minute<input type="number" name="schedule_minute" min="0" max="59" value="{{ defaults.default_schedule_minute or 0 }}" required></label>
+    <label>Backup-Policy<small>Genau eine Policy wird diesem Server zugewiesen.</small><select name="policy_id" required>{% for policy in policies %}<option value="{{ policy.id }}">{{ policy.name }}</option>{% endfor %}</select></label>
+    <label>Agent-Loglevel<small>INFO ist für den Betrieb empfohlen.</small><select name="agent_log_level"><option>DEBUG</option><option selected>INFO</option><option>WARNING</option><option>ERROR</option></select></label>
+    <label>Maximales Portallog<small>16–512 KB pro Backup-Lauf</small><input type="number" name="agent_log_max_kb" min="16" max="512" value="256" required></label>
+  </div>
+  <div class="checks">
+    <label><input type="checkbox" name="mail_on_success" checked> Mail bei Erfolg</label>
+    <label><input type="checkbox" name="mail_on_failure" checked> Mail bei Fehler</label>
+    <label><input type="checkbox" name="agent_log_local" checked> Ausgabe lokal protokollieren</label>
+    <label><input type="checkbox" name="agent_log_portal" checked> Laufprotokoll dauerhaft ans Portal senden</label>
+    <label><input type="checkbox" name="agent_log_traceback" checked> Traceback bei Fehlern protokollieren</label>
+    <label><input type="checkbox" name="run_initial_backup"> Erstes Backup direkt starten</label>
+  </div>
+  <div class="onboarding-hint"><strong>Vor dem nächsten Schritt</strong><span>Auf dem Quellserver werden nur root, curl, Python 3, OpenSSH, rsync und zstd benötigt. MariaDB wird automatisch erkannt.</span></div>
+  <div class="actions"><a class="secondary button" href="/">Abbrechen</a><button class="primary">Server anlegen</button></div>
+</form>
+{% endblock %}

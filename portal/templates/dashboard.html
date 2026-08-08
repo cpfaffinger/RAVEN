@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Übersicht · RAVEN{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">RAVEN Backup-Zielserver</p><h1>RAVEN Systemübersicht</h1><p class="muted">Recovery, Archiving, Verification, Events &amp; Notification · Aktueller Zustand aller registrierten Quellserver.</p></div>{% if user.role == 'admin' %}<a class="primary button" href="/clients/new">Neuen Server onboarden</a>{% endif %}</div>
+<section class="metrics">
+  <article><span>Server</span><strong>{{ clients|length }}</strong></article>
+  <article class="good"><span>Aktuell</span><strong>{{ counts.OK }}</strong></article>
+  <article class="warn"><span>Überfällig</span><strong>{{ counts.STALE }}</strong></article>
+  <article class="bad"><span>Fehler</span><strong>{{ counts.ERROR }}</strong></article>
+</section>
+<section class="panel">
+  <div class="panel-head"><h2>Backup-Server</h2><span class="muted">Backup-Volumen aus Checker, ersatzweise aus dem letzten Agentenbericht</span></div>
+  <div class="table-wrap"><table><thead><tr><th aria-sort="{{ ('ascending' if direction == 'asc' else 'descending') if sort == 'server' else 'none' }}"><a class="sort-link" href="/?sort=server&amp;direction={{ 'desc' if sort == 'server' and direction == 'asc' else 'asc' }}">Server <span aria-hidden="true">{{ '▲' if sort == 'server' and direction == 'asc' else '▼' if sort == 'server' else '↕' }}</span></a></th><th>Status</th><th>Letztes Signal</th><th aria-sort="{{ ('ascending' if direction == 'asc' else 'descending') if sort == 'volume' else 'none' }}"><a class="sort-link" href="/?sort=volume&amp;direction={{ 'asc' if sort == 'volume' and direction == 'desc' else 'desc' }}">Backup-Volumen <span aria-hidden="true">{{ '▲' if sort == 'volume' and direction == 'asc' else '▼' if sort == 'volume' else '↕' }}</span></a></th><th>Typ</th><th></th></tr></thead><tbody>
+  {% for client in clients %}
+  <tr><td><strong>{{ client.slug }}</strong><small>{{ client.source_hostname or client.username }}</small></td><td><span class="status {{ client.status|lower }}">{{ client.status }}</span></td><td>{{ client.result.latest or client.last_event_at or '–' }}</td><td data-volume-bytes="{{ client.volume_bytes if client.volume_bytes is not none else '' }}"><strong>{{ client.volume }}</strong><small>{{ client.volume_source }}</small></td><td>{{ client.result.mode or ('Importiert' if client.imported else 'Agent') }}</td><td><a href="/clients/{{ client.id }}">Details →</a></td></tr>
+  {% else %}<tr><td colspan="6" class="empty">Noch keine Backupserver registriert.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}

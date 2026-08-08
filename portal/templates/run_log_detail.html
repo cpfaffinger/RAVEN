@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Laufprotokoll {{ run_log.run_id or run_log.id }} · RAVEN{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">{{ client.slug }} · dauerhaftes Agentenlog</p><h1>{{ run_log.run_id or ('Log #' ~ run_log.id) }}</h1><p class="muted">Dieses Protokoll bleibt auch erhalten, wenn das zugehörige Backup rotiert oder manuell gelöscht wird.</p></div><a class="secondary button" href="/clients/{{ client.id }}">Zurück zum Server</a></div>
+<section class="detail-grid"><article class="panel"><h2>Lauf</h2><dl><dt>Status</dt><dd><span class="status {{ run_log.status }}">{{ run_log.status|upper }}</span></dd><dt>Quelle</dt><dd>{{ run_log.source_hostname }}</dd><dt>Phase</dt><dd>{{ run_log.phase or '–' }}</dd><dt>Start</dt><dd>{{ run_log.started_at or '–' }}</dd><dt>Abschluss</dt><dd>{{ run_log.finished_at }}</dd><dt>Empfangen</dt><dd>{{ run_log.received_at }}</dd></dl></article><article class="panel"><h2>Logging</h2><dl><dt>Level</dt><dd>{{ run_log.log_level }}</dd><dt>Größe</dt><dd>{{ log_size }}</dd><dt>Gekürzt</dt><dd>{{ 'Ja' if run_log.truncated else 'Nein' }}</dd><dt>Auftrag</dt><dd>{{ ('#' ~ run_log.command_id) if run_log.command_id else 'Manueller Lauf' }}</dd></dl></article></section>
+<section class="panel"><div class="panel-head"><h2>Agent-Ausgabe</h2><span class="muted">Zugangsdaten werden serverseitig redigiert.</span></div><pre class="agent-log">{{ run_log.log_text }}</pre></section>
+{% if report %}<section class="panel"><div class="panel-head"><h2>Strukturierter Abschlussbericht</h2><span class="muted">Volumen und Klassifizierungen</span></div><pre class="agent-log">{{ report|tojson(indent=2) }}</pre></section>{% endif %}
+{% endblock %}

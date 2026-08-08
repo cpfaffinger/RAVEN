@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ archive_name }} · Backup Explorer{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">Tar-Archiv</p><h1>{{ archive_name }}</h1><p class="muted">{{ total }} Einträge in diesem Ordner · {{ member_count }} gelesene Archivpfade{% if truncated %} · Anzeige sicher begrenzt{% endif %}</p></div><a class="secondary button" href="/clients/{{ client.id }}/explorer?path={{ archive_parent|urlencode }}">Zum Verzeichnis</a></div>
+<nav class="explorer-crumbs" aria-label="Backup-Pfad">{% for crumb in breadcrumbs %}<a href="/clients/{{ client.id }}/explorer?path={{ crumb.path|urlencode }}">{{ crumb.name }}</a><span>/</span>{% endfor %}<a href="/clients/{{ client.id }}/explorer/archive?path={{ archive_path|urlencode }}">{{ archive_name }}</a></nav>
+<nav class="explorer-crumbs archive-crumbs" aria-label="Archiv-Pfad">{% for crumb in archive_breadcrumbs %}<a href="/clients/{{ client.id }}/explorer/archive?path={{ archive_path|urlencode }}&prefix={{ crumb.prefix|urlencode }}">{{ crumb.name }}</a>{% if not loop.last %}<span>/</span>{% endif %}{% endfor %}</nav>
+{% if truncated %}<div class="alert warning">Das Archiv enthält mehr als 50.000 Pfade. Die Ansicht wurde zum Schutz des Portals begrenzt.</div>{% endif %}
+<section class="panel explorer-panel">
+  <div class="explorer-list archive-list explorer-head"><span>Name</span><span>Typ</span><span>Aktion</span></div>
+  {% for entry in entries %}<div class="explorer-list archive-list">
+    <span class="explorer-name">{% if entry.is_dir %}<span class="file-icon folder">DIR</span><a href="/clients/{{ client.id }}/explorer/archive?path={{ archive_path|urlencode }}&prefix={{ entry.prefix|urlencode }}">{{ entry.name }}</a>{% else %}<span class="file-icon">FILE</span>{{ entry.name }}{% endif %}</span>
+    <span>{{ 'Ordner' if entry.is_dir else 'Datei' }}</span>
+    <span>{% if not entry.is_dir %}<a class="download-link" href="/clients/{{ client.id }}/explorer/archive/download?path={{ archive_path|urlencode }}&member={{ entry.member|urlencode }}">Herunterladen</a>{% else %}–{% endif %}</span>
+  </div>{% else %}<p class="empty">Keine Einträge unter diesem Archivpfad.</p>{% endfor %}
+</section>
+{% if pages > 1 %}<nav class="explorer-pagination">{% if page > 1 %}<a class="secondary button" href="?path={{ archive_path|urlencode }}&prefix={{ prefix|urlencode }}&page={{ page - 1 }}">← Zurück</a>{% endif %}<span>Seite {{ page }} / {{ pages }}</span>{% if page < pages %}<a class="secondary button" href="?path={{ archive_path|urlencode }}&prefix={{ prefix|urlencode }}&page={{ page + 1 }}">Weiter →</a>{% endif %}</nav>{% endif %}
+{% endblock %}

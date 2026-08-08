@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily RAVEN certificate renewal check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=4h
+Unit=backup-portal-cert-renew.service
+
+[Install]
+WantedBy=timers.target

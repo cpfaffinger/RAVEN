@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+.venv/
+deploy-config.toml
+*.secret.toml
+
+# Runtime configuration and databases can contain credentials or tokens.
+.env
+.env.*
+!.env.example
+config.toml
+backup-check.toml
+backup-job.toml
+cloudflare-acme.toml
+*.db
+*.db-shm
+*.db-wal
+
+# Private key and certificate material must never be committed.
+*.key
+*.pem
+*.p12
+*.pfx
+*.ppk
+id_rsa
+id_ed25519
+
+# Local runtime output.
+*.log
+*.bak
+*.backup
+.coverage
+.pytest_cache/

@@ -1,0 +1,53 @@
+[monitor]
+home_root = "/home"
+user_glob = "backup_*"
+max_age_hours = 36
+require_nonempty = true
+check_volume_change = true
+volume_timeout_seconds = 300
+timestamp_formats = ["%Y%m%d", "%Y%m%d%H%M", "%Y%m%d%H%M%S", "%Y%m%d%H%M%S%f"]
+mirror_folder_patterns = ["current_copy", "rsync_copy_*"]
+ssh_activity_for_mirrors = true
+ssh_journal_unit = "ssh.service"
+ok_marker_name = ".backup-ok"
+require_ok_file_for_users = ["backup_example_web"]
+incomplete_grace_hours = 6
+
+# Glob-Muster koennen ganze Benutzer oder einzelne Unterordner ausnehmen.
+# Beispiele: "backup_alt", "backup_web0/current_copy", "*/test_*"
+ignore = []
+
+# Optional abweichende Fristen je Benutzer:
+# max_age_hours_by_user = { backup_weekly = 192 }
+
+[smtp]
+enabled = true
+host = "smtp.example.com"
+port = 25
+username = "backup-notification"
+password = "CHANGE_ME"
+from_address = "backup@example.com"
+to = []
+starttls = false
+timeout_seconds = 20
+
+[alerts]
+state_file = "/var/lib/backup-check/state.json"
+reminder_hours = 24
+send_recovery = true
+
+[storage]
+enabled = true
+path = "/home"
+minimum_free_percent = 15
+
+[cleanup]
+enabled = true
+run_hour = 23
+legacy_file_retention_days = 5
+legacy_file_patterns = ["*.tgz", "*.gz", "*.pst", "*.sql"]
+delete_empty_directories = true
+snapshot_name_digits = 17
+snapshot_retention_days = 7
+incomplete_snapshot_retention_hours = 48
+minimum_snapshots_to_keep = 2

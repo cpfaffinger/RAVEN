@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}TLS-Zertifikate · RAVEN{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">TLS und ACME</p><h1>Zertifikate</h1><p class="muted">Let's-Encrypt-DNS-01 ohne Abhängigkeit von einem lokalen Webserver verwalten.</p></div><span class="status {{ 'running' if renewal_running or challenge_running else 'success' }}">{{ 'ACME LÄUFT' if renewal_running or challenge_running else 'BEREIT' }}</span></div>
+{% if message %}<div class="callout"><strong>{{ message }}</strong> Die Seite aktualisiert sich während einer laufenden Challenge automatisch.</div>{% endif %}
+<section class="detail-grid certificate-grid">
+  <article class="panel"><p class="eyebrow">Aktives Zertifikat</p><h2>{{ acme.domain or 'Nicht konfiguriert' }}</h2>
+    {% if certificate.available %}<dl><dt>Gültig bis</dt><dd>{{ certificate.not_after }} ({{ certificate.days_remaining }} Tage)</dd><dt>Aussteller</dt><dd>{{ certificate.issuer }}</dd><dt>SANs</dt><dd>{{ certificate.sans|join(', ') or '–' }}</dd><dt>SHA-256</dt><dd class="break-value">{{ certificate.fingerprint }}</dd><dt>Datei</dt><dd>{{ certificate.path }}</dd></dl>
+    {% else %}<p class="status failure">NICHT VERFÜGBAR</p><p>{{ certificate.error or 'Zertifikatsdatei fehlt.' }}</p>{% endif %}
+  </article>
+  <article class="panel"><p class="eyebrow">Erneuerung</p><h2>DNS-01</h2><dl><dt>Modus</dt><dd>{{ acme.mode or 'nicht konfiguriert' }}</dd><dt>Provider-Automatik</dt><dd>{{ 'Cloudflare API aktiv' if acme.mode == 'dns-cloudflare' else 'Manueller TXT-Eintrag' if acme.mode == 'dns-manual' else '–' }}</dd><dt>Cloudflare-Zone</dt><dd>{% if acme.mode == 'dns-cloudflare' %}{{ cloudflare.zone_name or cloudflare.zone_id or 'automatische Erkennung' }}{% else %}–{% endif %}</dd><dt>Timer</dt><dd>{{ 'Aktiv' if timer_active else 'Inaktiv' }}</dd><dt>DNS-Resolver</dt><dd>{{ acme.resolvers|join(', ') if acme.resolvers else '–' }}</dd><dt>Propagation-Timeout</dt><dd>{{ acme.propagation_timeout_seconds or '–' }} Sekunden</dd></dl>
+    {% if acme.mode in ['dns-manual', 'dns-cloudflare'] %}<form method="post" action="/certificates/request" onsubmit="return confirm('Wirklich eine neue Zertifikatsausstellung und DNS-Challenge starten?')"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="primary" {% if renewal_running or challenge_running %}disabled{% endif %}>Zertifikat jetzt neu anfordern</button></form><p class="muted">Erzeugt absichtlich einen neuen DNS-Token. Im Cloudflare-Modus werden Anlage und Cleanup automatisch durchgeführt; die Propagation wird weiterhin extern geprüft. Nicht unnötig wiederholen, da Let’s Encrypt Rate Limits anwendet.</p>{% else %}<p class="muted">Die Portalsteuerung ist nur in einem verwalteten DNS-Modus verfügbar.</p>{% endif %}
+  </article>
+</section>
+
+{% if acme.mode == 'dns-cloudflare' %}
+<section class="panel form-panel"><div class="panel-head"><div><p class="eyebrow">Secret Management</p><h2>Cloudflare API-Token</h2></div><span class="status {{ 'success' if cloudflare_credentials.configured and cloudflare_credentials.secure else 'failure' }}">{{ 'KONFIGURIERT' if cloudflare_credentials.configured and cloudflare_credentials.secure else 'FEHLT' }}</span></div>
+  <p class="muted">Das Token wird niemals angezeigt oder in Logs geschrieben. Ein neuer Wert ersetzt die root-only Credentials-Datei atomar; empfohlen ist ein auf diese DNS-Zone begrenztes Token mit <code>Zone DNS Edit</code> und optional <code>Zone Read</code>.</p>
+  <form method="post" action="/certificates/cloudflare" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf }}"><label>Neues Cloudflare API-Token<input type="password" name="api_token" minlength="20" maxlength="512" pattern="[A-Za-z0-9_-]+" autocomplete="new-password" required></label><div class="actions"><button class="primary">Token sicher speichern</button></div></form>
+  {% if cloudflare_credentials.configured %}<form method="post" action="/certificates/cloudflare" onsubmit="return confirm('Cloudflare API-Token wirklich entfernen? Automatische Zertifikatserneuerungen schlagen danach fehl.')"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="remove_token" value="1"><button class="danger">Token entfernen</button></form>{% endif %}
+</section>
+{% endif %}
+
+<section class="panel"><div class="panel-head"><h2>Aktueller ACME-Lauf</h2><span class="status {{ job.status or 'unknown' }}">{{ (job.status or 'KEIN LAUF')|upper }}</span></div>
+  {% if job %}<dl><dt>Modus</dt><dd>{{ job.mode }}</dd><dt>Gestartet</dt><dd>{{ job.started_at or '–' }}</dd><dt>Beendet</dt><dd>{{ job.finished_at or '–' }}</dd><dt>Ergebnis</dt><dd>{{ job.message or '–' }}</dd></dl>{% if job.output %}<details><summary>Certbot-Ausgabe</summary><pre class="checker-output"><code>{{ job.output }}</code></pre></details>{% endif %}{% else %}<p class="empty">Noch kein portal-gesteuerter Zertifikatslauf.</p>{% endif %}
+</section>
+
+<section class="panel"><div class="panel-head"><h2>DNS-Challenges</h2><span class="muted">Neueste zuerst</span></div>
+  <p>Im Cloudflare-Modus legt der Hook den TXT-Eintrag automatisch an und entfernt exakt die erzeugte Record-ID nach Abschluss. Im manuellen Modus muss der angezeigte Wert beim DNS-Provider gesetzt werden. Die Propagation wird in beiden Fällen über alle konfigurierten Resolver geprüft.</p>
+  <div class="challenge-list">{% for challenge in challenges %}<article class="challenge-card {{ challenge.status }}"><div class="panel-head"><strong>{{ challenge.identifier }}</strong><span class="status {{ challenge.status }}">{{ challenge.status|upper }}</span></div>
+    <label>TXT-Name<div class="copy-field"><input id="dns-name-{{ challenge.id }}" readonly value="{{ challenge.record_name }}"><button type="button" class="secondary" data-copy-target="dns-name-{{ challenge.id }}">Kopieren</button><span class="copy-result" aria-live="polite"></span></div></label>
+    <label>TXT-Wert<div class="copy-field"><input id="dns-value-{{ challenge.id }}" readonly value="{{ challenge.record_value }}"><button type="button" class="secondary" data-copy-target="dns-value-{{ challenge.id }}">Kopieren</button><span class="copy-result" aria-live="polite"></span></div></label>
+    <dl><dt>Provider</dt><dd>{{ challenge.provider or 'manual' }}</dd><dt>Angelegt</dt><dd>{{ challenge.created_at }}</dd><dt>Zuletzt geprüft</dt><dd>{{ challenge.last_checked_at or '–' }}</dd><dt>Sichtbar über</dt><dd>{{ challenge.seen_by|join(', ') or 'noch keinen Resolver' }}</dd><dt>Aufräumen</dt><dd>{{ 'Automatisch entfernt' if challenge.status == 'cleaned' else 'TXT-Eintrag entfernen/prüfen' if challenge.cleanup_required else 'noch nicht' }}</dd></dl>
+  </article>{% else %}<p class="empty">Noch keine DNS-01-Challenge vorhanden.</p>{% endfor %}</div>
+</section>
+{% if renewal_running or challenge_running %}<script>setTimeout(() => window.location.reload(), 10000);</script>{% endif %}
+{% endblock %}

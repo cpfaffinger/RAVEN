@@ -1,0 +1,28 @@
+.manual-head { align-items: center; }
+.manual-version { color: var(--muted); font-size: 12px; }
+.manual-layout { display: grid; grid-template-columns: 245px minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+.manual-toc { position: sticky; top: 1.25rem; display: grid; gap: .2rem; padding: 1rem; }
+.manual-toc strong { padding: .45rem .6rem; }
+.manual-toc a { padding: .42rem .6rem; border-radius: 7px; color: var(--muted); text-decoration: none; font-size: 13px; }
+.manual-toc a:hover { color: var(--accent2); background: #eef7f5; }
+.manual-content { min-width: 0; }
+.doc-section { scroll-margin-top: 1.25rem; }
+.doc-section h2 { font-size: 25px; margin: .25rem 0 1rem; }
+.doc-section h3 { margin: 1.5rem 0 .6rem; font-size: 16px; }
+.doc-section p, .doc-section li { max-width: 88ch; }
+.doc-section li { margin: .35rem 0; }
+.doc-section pre { overflow: auto; padding: 1rem; border-radius: 9px; background: #102731; color: #e8f4f2; }
+.doc-section code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.doc-section p code, .doc-section li code, .doc-table code, .path-list code { padding: .12rem .35rem; border-radius: 4px; background: #edf2f4; color: #24404d; }
+.fact-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; margin: 1.25rem 0; }
+.fact-grid div { display: grid; gap: .25rem; padding: 1rem; border: 1px solid var(--line); border-radius: 9px; overflow-wrap: anywhere; }
+.fact-grid span { color: var(--muted); font-size: 12px; }
+.doc-table { min-width: 640px; }
+.doc-table th, .doc-table td { padding: .75rem 1rem; }
+.path-list { display: grid; grid-template-columns: minmax(180px, auto) 1fr; gap: 0; margin: 1rem 0; border-top: 1px solid var(--line); }
+.path-list > * { padding: .75rem; border-bottom: 1px solid var(--line); }
+.callout { margin: 1.25rem 0; padding: 1rem; border-left: 4px solid var(--accent2); border-radius: 7px; background: #eef7f5; }
+.check-list { columns: 2; padding-left: 1.25rem; }
+.check-list li::marker { color: var(--good); }
+@media (max-width: 980px) { .manual-layout { grid-template-columns: 1fr; } .manual-toc { position: static; grid-template-columns: repeat(2, 1fr); } .manual-toc strong { grid-column: 1 / -1; } .fact-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 620px) { .manual-toc, .fact-grid { grid-template-columns: 1fr; } .path-list { grid-template-columns: 1fr; } .path-list code { border-bottom: 0; } .check-list { columns: 1; } }

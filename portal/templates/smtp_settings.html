@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}SMTP · RAVEN{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">Benachrichtigungen</p><h1>SMTP-Konfiguration</h1><p class="muted">Die Einstellungen liegen verschlüsselt in SQLite und werden zentral an Checker und neu konfigurierte Agenten ausgeliefert.</p></div><span class="status success">PLAIN SMTP</span></div>
+{% if message %}<div class="alert warning">{{ message }}</div>{% endif %}
+<form method="post" action="/settings/smtp" class="panel form-panel stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <div class="form-grid"><label>SMTP-Host<input name="host" value="{{ smtp.host }}" required></label><label>Port<input type="number" name="port" min="1" max="65535" value="{{ smtp.port }}" required></label></div>
+  <div class="form-grid"><label>Benutzername<input name="username" value="{{ smtp.username }}"></label><label>Passwort<small>Leer lassen, um das gespeicherte Passwort beizubehalten.</small><input type="password" name="password" autocomplete="new-password"></label></div>
+  <label>Absender<input type="email" name="from_address" value="{{ smtp.from_address }}" required></label>
+  <label>Empfänger<small>Mehrere Adressen durch Komma trennen.</small><input name="recipients" value="{{ smtp.to }}" required></label>
+  <div class="form-grid"><label>Timeout in Sekunden<input type="number" name="timeout_seconds" min="5" max="120" value="{{ smtp.timeout_seconds }}" required></label><label>Transport<input value="Plain SMTP (kein STARTTLS, kein SMTPS)" readonly></label></div>
+  <div class="checks"><label><input type="checkbox" name="enabled" {% if smtp.enabled %}checked{% endif %}> Mailversand aktiviert</label></div>
+  <div class="actions"><button class="primary">SMTP speichern</button></div>
+</form>
+{% endblock %}

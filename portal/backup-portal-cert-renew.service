@@ -1,0 +1,28 @@
+[Unit]
+Description=RAVEN DNS-01 certificate renewal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=BACKUP_PORTAL_CONFIG=/etc/backup-portal/config.toml
+WorkingDirectory=/opt/backup-portal
+ExecStart=/opt/backup-portal/venv/bin/python /opt/backup-portal/acme_manager.py
+TimeoutStartSec=3h
+UMask=0077
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native

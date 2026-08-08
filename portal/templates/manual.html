@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}Handbuch · RAVEN{% endblock %}
+{% block content %}
+<div class="page-head manual-head"><div><p class="eyebrow">Betriebsdokumentation</p><h1>RAVEN Handbuch</h1><p class="muted">Recovery, Archiving, Verification, Events &amp; Notification · Onboarding, Betrieb, Überwachung, Wiederherstellung und Fehleranalyse für Portal, Agent und zentralen Checker.</p></div><span class="manual-version">Stand: produktive Portalversion</span></div>
+
+<div class="manual-layout">
+  <aside class="manual-toc panel" aria-label="Inhaltsverzeichnis">
+    <strong>Inhalt</strong>
+    <a href="#overview">1. Systemübersicht</a>
+    <a href="#roles">2. Rollen und Zugriffe</a>
+    <a href="#onboarding">3. Server onboarden</a>
+    <a href="#agent">4. Backup-Agent</a>
+    <a href="#policies">5. Backup-Policies</a>
+    <a href="#data">6. Backup-Inhalte</a>
+    <a href="#status">7. Status und Volumen</a>
+    <a href="#notifications">8. E-Mail</a>
+    <a href="#monitoring">9. Monitoring-Probes</a>
+    <a href="#operations">10. Portalbetrieb</a>
+    <a href="#configuration">11. Konfiguration</a>
+    <a href="#security">12. Sicherheit</a>
+    <a href="#restore">13. Wiederherstellung</a>
+    <a href="#troubleshooting">14. Fehleranalyse</a>
+    <a href="#checklist">15. Checklisten</a>
+  </aside>
+
+  <article class="manual-content">
+    <section id="overview" class="panel doc-section">
+      <p class="eyebrow">01</p><h2>Systemübersicht</h2>
+      <p>Das System besteht aus drei Komponenten. Das <strong>Backup-Portal</strong> verwaltet lokale Portalbenutzer, isolierte Zielkonten, Deployment-Tokens, Agentereignisse und den Checker-Worker. Der <strong>Backup-Agent</strong> läuft als root auf jedem Quellserver und überträgt Daten direkt per SSH. Der <strong>zentrale Checker</strong> wird vom Portal statt per Cron ausgeführt und bewertet Aktualität, Erfolgsmarker, Volumen, freien Speicher und Aufbewahrung auf dem Zielserver.</p>
+      <div class="fact-grid"><div><span>Portal</span><strong>{{ portal_url }}</strong></div><div><span>SSH-Ziel</span><strong>{{ ssh_host }}:{{ ssh_port }}</strong></div><div><span>Portal-Port</span><strong>{{ portal_port }}/TCP</strong></div><div><span>Zielkonten</span><strong>backup_*</strong></div></div>
+      <h3>Datenfluss</h3>
+      <ol><li>Ein Administrator legt oder importiert einen Client im Portal und definiert Mail- sowie Logging-Verhalten.</li><li>Das Portal erzeugt einen kurzlebigen Curl-Befehl.</li><li>Die Quelle erzeugt lokal einen privaten Ed25519-Schlüssel und registriert nur den öffentlichen Schlüssel.</li><li>Das Portal liefert Agent und fertig konfektionierte, versionierte TOML-Konfiguration im Curl-Onboarding aus.</li><li>Der Agent pollt das Portal minütlich; Tagesplan und manuelle Trigger werden auf dem Zielserver als atomare Queue gesteuert.</li><li>Der Agent streamt MariaDB und synchronisiert Dateisystemdaten direkt zum isolierten Zielkonto.</li><li>Manifest und <code>.backup-ok</code> markieren einen vollständigen Lauf; das begrenzte Laufprotokoll wird separat in der Portal-Datenbank archiviert.</li></ol>
+    </section>
+
+    <section id="roles" class="panel doc-section">
+      <p class="eyebrow">02</p><h2>Rollen und Zugriffe</h2>
+      <table class="doc-table"><thead><tr><th>Rolle</th><th>Rechte</th><th>Empfehlung</th></tr></thead><tbody><tr><td><code>admin</code></td><td>Clients und Deployment-Tokens verwalten, lokale Portalbenutzer anlegen und Passwörter zurücksetzen.</td><td>Nur für Backup-Administratoren.</td></tr><tr><td><code>viewer</code></td><td>Dashboard, Clientdetails, Status und Handbuch lesen.</td><td>Für Betrieb, Support und Audits.</td></tr></tbody></table>
+      <p>Benutzer werden unter <strong>Benutzer</strong> lokal verwaltet. Passwörter müssen mindestens zwölf Zeichen lang sein. Ein Administrator kann weder sein eigenes Konto noch den letzten aktiven Administrator deaktivieren.</p>
+    </section>
+
+    <section id="onboarding" class="panel doc-section">
+      <p class="eyebrow">03</p><h2>Server onboarden</h2>
+      <h3>Voraussetzungen auf der Quelle</h3>
+      <ul><li>Root-Zugriff und eine Debian- oder Ubuntu-basierte Distribution. Andere Distributionen werden kontrolliert abgewiesen.</li><li><code>curl</code> und Python 3 müssen zum Start des Ein-Befehl-Onboardings vorhanden sein.</li><li>Der Bootstrap prüft und installiert fehlende Pakete automatisch über <code>apt-get</code>: <code>zstd</code>, <code>bash</code>, <code>rsync</code>, <code>openssh-client</code>, <code>tar</code>, <code>coreutils</code>, <code>cron</code>, CA-Zertifikate und bei älteren Python-Versionen <code>python3-tomli</code>.</li><li>Für Datenbankbackups: lokale MariaDB mit <code>mariadb</code> und <code>mariadb-dump</code>, erreichbar über den Unix-Socket. MariaDB selbst wird nicht automatisch installiert, weil sie Anwendungsbestandteil des Quellservers ist.</li><li>Ausgehende Verbindung zu den Debian/Ubuntu-Paketquellen, zu {{ ssh_host }}:{{ ssh_port }} und HTTPS zu {{ portal_url }}.</li><li>Der konfigurierte Hostname muss <code>hostname -f</code> entsprechen.</li></ul>
+      <h3>Schritt 1 – Client anlegen</h3>
+      <ol><li><strong>Server onboarden</strong> öffnen.</li><li>Einen stabilen Slug aus Kleinbuchstaben, Ziffern, Minus oder Unterstrich wählen.</li><li>Optional den erwarteten FQDN und den täglichen Zeitplan setzen.</li><li>Erfolgs-/Fehlermail, lokales Logging, Portal-Logging, Loglevel, Traceback und maximale Loggröße festlegen.</li><li>Festlegen, ob nach dem Bootstrap sofort ein vollständiges Backup starten soll.</li></ol>
+      <h3>Schritt 2 – Curl-Befehl ausführen</h3>
+      <p>Im Clientdetail <strong>Curl-Befehl erzeugen</strong> wählen, den vollständigen Befehl kopieren und als root auf genau der vorgesehenen Quelle ausführen. Das Token ist {{ token_minutes }} Minuten gültig. Solange es unbenutzt und gültig ist, kann der Befehl erneut angezeigt oder widerrufen werden.</p>
+      <div class="callout"><strong>Wichtig:</strong> Der Befehl enthält ein sensibles Einmal-Token. Nicht in Tickets, Chatverläufe oder persistente Logs kopieren. Nach erfolgreicher Registrierung ist er automatisch ungültig.</div>
+      <h3>Schritt 3 – Ergebnis prüfen</h3>
+      <ul><li><code>HEARTBEAT</code> bestätigt Installation und Portalverbindung.</li><li><code>ONLINE</code> bedeutet, dass der Agent innerhalb der letzten drei Minuten gepollt hat.</li><li><code>QUEUED/CLAIMED/RUNNING</code> zeigen den zentralen Auftragsfortschritt.</li><li><code>SUCCESS</code> bestätigt Manifest und Erfolgsmarker auf dem Ziel.</li><li><code>FAILURE</code> enthält Phase, Fehlerklasse und Fehlermeldung.</li></ul>
+    </section>
+
+    <section id="agent" class="panel doc-section">
+      <p class="eyebrow">04</p><h2>Backup-Agent</h2>
+      <div class="path-list"><code>/root/backup</code><span>Ausführbarer Python-Agent, Modus 0700</span><code>/root/backup-job.toml</code><span>Geheime Clientkonfiguration, Modus 0600</span><code>/root/.ssh/raven_backup_&lt;slug&gt;</code><span>Privater Ed25519-Schlüssel, Modus 0600</span><code>/var/log/raven-backup.log</code><span>Cron-Ausgabe und Fehlerprotokoll</span></div>
+      <h3>Automatische Installation</h3>
+      <p>Der Bootstrap validiert zuerst Debian/Ubuntu und installiert fehlende Backup-Abhängigkeiten idempotent über <code>apt-get</code>. Danach erkennt er MariaDB, registriert den öffentlichen Schlüssel, liefert Agent und TOML-Konfiguration aus, verwaltet markierte SSH-/Cron-Blöcke, pinnt den Ed25519-Host-Key und führt Preflight plus Heartbeat aus. Frühere Cronzeilen desselben Backup-Jobs werden entfernt; fremde Cronjobs bleiben unverändert.</p>
+      <h3>Manuelle Kommandos</h3>
+      <pre><code>python3 /root/backup --config /root/backup-job.toml --preflight-only
+python3 /root/backup --config /root/backup-job.toml --check-status
+python3 /root/backup --config /root/backup-job.toml --poll
+python3 /root/backup --config /root/backup-job.toml --test-email
+python3 /root/backup --config /root/backup-job.toml</code></pre>
+      <h3>Zentrale Steuerung</h3><p>Der Agent-Cron führt jede Minute ausschließlich <code>--poll</code> aus. Der Portal-Scheduler erzeugt zum konfigurierten Tageszeitpunkt einen Auftrag; Administratoren können zusätzlich <strong>Backup jetzt anfordern</strong> wählen. Der Agent claimt genau einen Auftrag atomar und führt ihn aus.</p>
+      <p>Ein interner, nicht blockierender Dateilock gilt für Poll-, manuelle und geplante Läufe. Solange ein Backup läuft, erkennen weitere Agentaufrufe den belegten Lock und beenden sich ohne zweiten Lauf. Ein zweiter Portal-Trigger wird bereits bei aktiver oder gequeueter Anforderung abgewiesen.</p>
+      <h3>Portal-Konfiguration und Laufprotokolle</h3><p>Die Agent-Konfiguration wird pro Client im Portal gepflegt. Jede Änderung erhöht die Konfigurationsversion; ein neu erzeugter Curl-Befehl installiert die aktuelle Fassung inklusive Mail- und Logging-Entscheidungen auf der Quelle. Nach jedem tatsächlich gestarteten Backup sendet der Agent das begrenzte Laufprotokoll und einen kompakten strukturierten Abschlussbericht an <code>/api/agent/logs</code>. Ein fehlgeschlagener Logupload verändert den Backup-Erfolg nicht und wird lokal als Warnung protokolliert.</p><p>Die Portal-Datenbank speichert diese Protokolle unabhängig von <code>/home/backup_*</code>. Das Löschen oder Rotieren eines Backup-Verzeichnisses entfernt daher weder Laufhistorie noch Protokoll. Portal-Logs sind admin-only, werden größenbegrenzt und serverseitig um typische Token-/Passwortmuster bereinigt.</p>
+    </section>
+
+    <section id="policies" class="panel doc-section">
+      <p class="eyebrow">05</p><h2>Backup-Policies</h2>
+      <p>Jeder Server besitzt genau eine Policy. Eine Policy steuert drei getrennte Bereiche: MariaDB-Datenbanken, MariaDB-Benutzer/Rechte und die Regeln für absolute Dateisystempfade. Administratoren modellieren Policies im Menü <strong>Policies</strong> und weisen sie beim Onboarding oder im Clientdetail zu.</p>
+      <h3>MariaDB-Optionen</h3><ul><li><strong>Datenbanken sichern:</strong> exportiert Schema, Trigger, Routinen, Events und Nutzdaten jeder Anwendungsdatenbank. Systemdatenbanken bleiben ausgenommen.</li><li><strong>Datenbankbenutzer und Rechte sichern:</strong> exportiert Benutzer als <code>CREATE USER</code>- und <code>GRANT</code>-Anweisungen. Diese Option funktioniert unabhängig von der Datenbanksicherung.</li><li>Sind beide Optionen ausgeschaltet, benötigt der Agent für diese Policy keine lokale MariaDB-Sicherung. Ist nur eine Option aktiv, wird ausschließlich dieser Teil erzeugt.</li></ul>
+      <table class="doc-table"><thead><tr><th>Modus</th><th>Ziel</th><th>Eigenschaft</th></tr></thead><tbody><tr><td><code>sync</code></td><td><code>current/&lt;zielname&gt;/</code></td><td>Aktuelle 1:1-Kopie mit rsync; entfernte Quelldateien werden auch am Ziel entfernt. Bewusste Ausnahme ohne Archiv.</td></tr><tr><td><code>tar</code></td><td><code>&lt;run-id&gt;/filesystem/&lt;zielname&gt;.tar.zst</code></td><td>Persistentes Zstandard-Archiv; wird direkt über SSH gestreamt, ohne lokale Zwischenablage.</td></tr></tbody></table>
+      <p>Der frühere Modus <code>snapshot</code> wird bei der Portalaktualisierung automatisch auf <code>tar</code> migriert. Bereits vorhandene historische rsync-Verzeichnisse bleiben unverändert und weiterhin lesbar; nur neue persistente Läufe werden ausschließlich als <code>.tar.zst</code> geschrieben.</p>
+      <p>Eine Policy darf keine Dateisystempfade enthalten. Sind zusätzlich beide MariaDB-Optionen deaktiviert, entsteht eine leere Kontroll-Policy: Der Agent pollt und meldet sich weiterhin, führt den SSH-/Speicher-Preflight aus und schreibt bei einem geplanten Lauf Manifest, Laufprotokoll und <code>.backup-ok</code>, schützt aber 0 B Nutzdaten. Quellpfade müssen ansonsten absolut sein; <code>/</code> selbst und Pfade mit <code>..</code> sind gesperrt.</p>
+      <div class="callout"><strong>Atomare Aufträge:</strong> Beim Queuen wird eine unveränderliche Kopie der aktuellen Policy in den Auftrag geschrieben. Änderungen beeinflussen daher nur neu gequeuete Backups, niemals einen bereits wartenden oder laufenden Auftrag. Während eines aktiven Auftrags ist ein Policy-Wechsel gesperrt.</div>
+      <h3>Empfohlene Modellierung</h3><ul><li><code>/home</code> als <code>sync</code>, wenn nur der aktuelle Webbestand benötigt wird und die fachlichen Deltas in MariaDB liegen.</li><li><code>/etc</code> als <code>tar</code>, wenn ältere Konfigurationsstände komprimiert wiederherstellbar bleiben sollen.</li><li>MariaDB aktivieren, wenn eine lokale Installation vorhanden ist; Benutzer, Grants, Schemas und Nutzdaten werden als <code>.sql.zst</code> persistent pro Lauf gesichert.</li><li>Änderungen zunächst einem Testserver zuweisen und über Klassifizierungen, Manifest und Restore-Stichprobe validieren.</li></ul>
+    </section>
+
+    <section id="data" class="panel doc-section">
+      <p class="eyebrow">06</p><h2>Backup-Inhalte und Format</h2>
+      <table class="doc-table"><thead><tr><th>Klassifizierung</th><th>Inhalt</th><th>Methode</th></tr></thead><tbody><tr><td><code>filesystem_&lt;zielname&gt;</code></td><td>In der Policy definierter lokaler Ordner</td><td><code>sync</code> oder <code>tar.zst</code></td></tr><tr><td><code>mariadb_users</code></td><td>Benutzer und Rechte</td><td>Komprimierte CREATE USER- und GRANT-Anweisungen als <code>.sql.zst</code></td></tr><tr><td><code>mariadb_schemas</code></td><td>Schema jeder Anwendungsdatenbank</td><td>Komprimierter Dump ohne Daten als <code>.sql.zst</code></td></tr><tr><td><code>mariadb_data</code></td><td>Daten je Datenbank</td><td><code>mariadb-dump | zstd | ssh</code></td></tr></tbody></table>
+      <p>Systemdatenbanken wie <code>information_schema</code>, <code>performance_schema</code>, <code>mysql</code> und <code>sys</code> werden nicht als normale Anwendungsdatenbanken exportiert. Benutzer und Grants werden separat und nur bei aktivierter Benutzeroption gesichert. Große Datenbanken wechseln ab der konfigurierten Schwelle auf einen Tabellen-Fallback.</p>
+      <h3>Zielstruktur</h3>
+      <pre><code>/home/backup_&lt;slug&gt;/
+├── current/&lt;sync-ziel&gt;/
+└── YYYYMMDDhhmmssfff/
+    ├── database/
+    ├── filesystem/&lt;zielname&gt;.tar.zst
+    ├── backup.log
+    ├── manifest.json
+    └── .backup-ok</code></pre>
+      <p>Partielle Dateien tragen während der Übertragung die Endung <code>.partial</code>. Erst erfolgreiche Streams werden atomar auf den endgültigen Namen verschoben.</p>
+      <h3>Backup Explorer</h3>
+      <p>Administratoren können unter <strong>Explorer</strong> jedes registrierte <code>backup_*</code>-Home read-only durchsuchen. Normale Dateien aus persistenten Läufen und <code>current</code>-Kopien lassen sich einzeln herunterladen. Bei <code>.tar</code>, <code>.tar.gz</code>/<code>.tgz</code> und <code>.tar.zst</code>/<code>.tzst</code> zeigt das Portal die interne Ordnerstruktur und streamt ausgewählte Einzeldateien, ohne das komplette Archiv auf dem Portalserver zu entpacken.</p>
+      <div class="callout"><strong>Sicherheitsgrenzen:</strong> Der Explorer ist ausschließlich für Portal-Administratoren sichtbar. Relative Pfade, Archivmitglieder und reale Zielpfade werden gegen das zugewiesene Backup-Home validiert; <code>..</code>, absolute Pfade und symbolische Links werden nicht geöffnet. Downloads werden im Audit-Log protokolliert. Archivlisten sind auf 50.000 Pfade und zwei gleichzeitige Scans begrenzt.</div>
+    </section>
+
+    <section id="status" class="panel doc-section">
+      <p class="eyebrow">07</p><h2>Status, Volumen und Checker</h2>
+      <p>Der Agent sendet Ereignisse und nach Laufende ein dauerhaftes Protokoll direkt an das Portal. Der zentrale Checker arbeitet unabhängig davon und untersucht die Daten auf dem Zielserver. Das Dashboard bevorzugt den Checkerstatus und ergänzt ihn um das jüngste Agentereignis.</p>
+      <p>Jeder zentrale Auftrag besitzt ID, Grund (<code>manual</code> oder <code>schedule</code>), Anforderungs-, Start- und Endzeit, Run-ID sowie Abschlussmeldung. Geplante Läufe werden pro Client und Kalendertag dedupliziert. Ist nach der Sollzeit bereits ein erfolgreicher Lauf vorhanden, gilt der Tagesplan als erfüllt.</p>
+      <ul><li><strong>OK:</strong> aktueller, nicht leerer Lauf mit gültigem Erfolgsmarker.</li><li><strong>STALE:</strong> kein ausreichend aktuelles Backup oder nur veraltete Spiegeldaten.</li><li><strong>ERROR:</strong> struktureller Fehler, ungültiger Marker, Benutzer-/Home-Abweichung oder anderer Prüffehler.</li><li><strong>UNKNOWN/RUNNING:</strong> noch keine belastbaren Checkerdaten beziehungsweise aktiver Lauf.</li></ul>
+      <p>Volumen werden automatisch als B, KB, MB, GB oder TB dargestellt. Die Serverübersicht zeigt pro Client das zuletzt geschützte Nutzdatenvolumen und kann über den Tabellenkopf <strong>Backup-Volumen</strong> auf- oder absteigend sortiert werden; Clients ohne Messwert bleiben am Ende. Der Checkerwert hat Vorrang, ersatzweise wird der letzte strukturierte Agentenbericht verwendet. Der Checker vergleicht außerdem jeden Lauf mit dem vorherigen und weist die Differenz aus.</p>
+      <pre><code>python3 /opt/backup-portal/checker/backup_check.py --config /etc/backup-portal/backup-check.toml --dry-run
+python3 /opt/backup-portal/checker/backup_check.py --config /etc/backup-portal/backup-check.toml --force
+journalctl -u backup-portal</code></pre>
+      <h3>Portal-gesteuerter Checker</h3><p>Im Menü <strong>Checker</strong> werden Automatik, Intervall, nächster Lauf und die letzten 30 Ausführungen verwaltet. Administratoren können eine normale Prüfung, einen sicheren Dry-Run, einen Force-Report, eine SMTP-Anmeldung oder eine Testmail auslösen. Der Worker verhindert über SQLite atomar überlappende Läufe und klassifiziert Exit-Code 1 als erfolgreich abgeschlossene Prüfung mit gefundenen Problemen.</p>
+      <p>Normale und erzwungene Läufe dürfen Statusdatei, zustandsabhängige Alarmierung und das in der Checker-TOML konfigurierte Cleanup verwenden. Ein Dry-Run verändert keinen Checkerstatus, sendet keine Mail und löscht nichts. Die vollständige Ausgabe jedes Laufs wird begrenzt in der Portal-Datenbank gespeichert; Detailausgaben sind admin-only.</p>
+    </section>
+
+    <section id="notifications" class="panel doc-section">
+      <p class="eyebrow">08</p><h2>E-Mail-Benachrichtigungen</h2>
+      <p>Erfolgs- und Fehlermails sind pro Client unabhängig aktivierbar. Erfolgsmails enthalten Run-ID, Quelle, Ziel, Dauer, Gesamtvolumen und die Größen der Klassifizierungen. Fehlermails enthalten Phase, Fehlerklasse, Meldung und Traceback. Der zentrale Checker versendet zustandsabhängige HTML-Alarme und kann mit <code>--force</code> einen vollständigen Report erzwingen.</p>
+      <p>Die zentrale SMTP-Konfiguration liegt in SQLite; das Passwort wird mit dem Portal-Master-Secret verschlüsselt. Checker-Läufe erhalten eine kurzlebige root-only Konfigurationsdatei unter <code>/run</code>, und beim autorisierten Onboarding wird die Konfiguration in die root-only Agent-TOML übertragen. Der Transport ist fest Plain-SMTP ohne STARTTLS oder SMTPS. Zugangsdaten werden weder im Portalhandbuch noch in Agentereignissen, Laufprotokollen oder Auditdetails angezeigt.</p>
+    </section>
+
+    <section id="monitoring" class="panel doc-section">
+      <p class="eyebrow">09</p><h2>Monitoring-Probes</h2>
+      <table class="doc-table"><thead><tr><th>Endpoint</th><th>Bedeutung</th><th>Erfolg</th></tr></thead><tbody><tr><td><a href="/livez"><code>/livez</code></a></td><td>Liveness: Der ASGI-Prozess kann HTTP beantworten. Keine Abhängigkeitsprüfung.</td><td>HTTP 200, <code>status=alive</code></td></tr><tr><td><a href="/readyz"><code>/readyz</code></a></td><td>Readiness: SQLite, Tokenverschlüsselung, Ziel-Home, zentraler Scheduler sowie Backup- und Bootstrap-Assets sind nutzbar.</td><td>HTTP 200; bei kritischer Abhängigkeit HTTP 503</td></tr><tr><td><a href="/healthz"><code>/healthz</code></a></td><td>Kompatibilitätsalias für Readiness.</td><td>Wie <code>/readyz</code></td></tr></tbody></table>
+      <p>Die Probes benötigen keine Anmeldung und geben keine Geheimnisse aus. Für systemd, Uptime-Monitoring, Load-Balancer oder Container-Orchestrierung sollte <code>/livez</code> zur Neustartentscheidung und <code>/readyz</code> zur Trafficfreigabe verwendet werden.</p>
+      <pre><code>curl -fsS {{ portal_url }}/livez
+curl -fsS {{ portal_url }}/readyz</code></pre>
+    </section>
+
+    <section id="operations" class="panel doc-section">
+      <p class="eyebrow">10</p><h2>Portalbetrieb</h2>
+      <div class="path-list"><code>/opt/backup-portal</code><span>Anwendung, Templates, statische Dateien, Agent und Checker</span><code>/opt/backup-portal/checker/backup_check.py</code><span>Vom Portal-Worker ausgeführter Checker</span><code>/etc/backup-portal/backup-check.toml</code><span>Root-only Checker-Konfiguration</span><code>{{ config_path }}</code><span>Produktive Portalkonfiguration, Modus 0600</span><code>{{ database_path }}</code><span>SQLite-Datenbank, Modus 0600</span><code>/etc/systemd/system/backup-portal.service</code><span>Root-Systemdienst</span></div>
+      <pre><code>systemctl status backup-portal
+systemctl restart backup-portal
+journalctl -u backup-portal -f
+ss -ltnp | grep ':{{ portal_port }}'
+ufw status | grep '{{ portal_port }}'</code></pre>
+      <p>Der Dienst ist für den Boot aktiviert. Basisdomain und optionale Subdomain aus <code>[domain]</code> sind die zentrale Quelle für Portal-URL, Curl-Onboarding, Agent-Endpunkte, SSH-Ziel, Trusted Hosts, Let’s Encrypt und Cloudflare. Der High-Port kommt ergänzend aus <code>[server].port</code>. Bei Änderungen müssen nur diese zentralen Werte sowie gegebenenfalls UFW und externe Monitoring-Konfiguration angepasst werden. Backup-Prüfung und Cleanup benötigen auf dem Zielserver keinen Cronjob mehr; ihr Lifecycle ist an <code>backup-portal.service</code> gebunden.</p>
+      <h3>TLS und DNS-01</h3><p>Im empfohlenen Modus <code>dns-cloudflare</code> fordert das Portal Let’s-Encrypt-Zertifikate ohne lokalen Webserver und ohne Port 80 an. Der Auth-Hook erzeugt den TXT-Record über ein auf die Zone begrenztes Cloudflare-API-Token, schreibt den Status nach <code>/var/lib/backup-portal/acme</code>, wartet auf die Sichtbarkeit über alle konfigurierten Resolver und löscht nach der Validierung exakt die erzeugte Record-ID. Token und API-Header werden im Webinterface nie angezeigt.</p><p>Ein täglicher systemd-Timer übernimmt die Erneuerungsprüfung; nach einem Zertifikatswechsel wird der Portalprozess neu gestartet. <code>dns-manual</code> zeigt den TXT-Wert als Provider-unabhängigen Fallback an. <code>http-standalone</code> benötigt Port 80; <code>existing</code> verwendet extern verwaltete Zertifikatsdateien.</p>
+    </section>
+
+    <section id="configuration" class="panel doc-section">
+      <p class="eyebrow">11</p><h2>Konfiguration</h2>
+      <table class="doc-table"><thead><tr><th>Abschnitt</th><th>Wichtige Felder</th></tr></thead><tbody><tr><td><code>[domain]</code></td><td>Zentrale DNS-Basisdomain <code>tld</code> und optionale <code>subdomain</code>; alle Hostnamen und öffentlichen URLs werden daraus abgeleitet.</td></tr><tr><td><code>[server]</code></td><td>Listeneradresse, High-Port und TLS-Dateien.</td></tr><tr><td><code>[acme]</code></td><td>DNS-01-Modus, Kontaktadresse, State-Verzeichnis, Hook, Resolver sowie Propagations-Timeout und Pollintervall.</td></tr><tr><td><code>[database]</code></td><td>Pfad zur Portal-SQLite-Datenbank.</td></tr><tr><td><code>[paths]</code></td><td>Agent-/Bootstrap-Assets, Checker-State und Home-Wurzel.</td></tr><tr><td><code>[checker]</code></td><td>Checker-Script, Checker-TOML, Standardintervall, Timeout und initiale Aktivierung; Intervall und Aktivierung werden danach im Webinterface verwaltet.</td></tr><tr><td><code>[onboarding]</code></td><td>Benutzerpräfix, SSH-Port, Tokenlaufzeit, Standardzeitplan, Speicherreserve und DB-Splitschwelle.</td></tr><tr><td><code>[security]</code></td><td>Sitzungsdauer und Master-Secret für die Verschlüsselung abrufbarer Deployment-Tokens.</td></tr><tr><td><code>smtp_settings</code></td><td>Zentrale SQLite-Konfiguration für Plain-SMTP: Host, Port, Benutzer, verschlüsseltes Passwort, Absender, Empfänger und Timeout.</td></tr></tbody></table>
+      <div class="callout"><strong>Nach Änderungen:</strong> TOML-Syntax prüfen, Dateirechte 0600 beibehalten, Dienst neu starten und anschließend <code>/readyz</code> kontrollieren. Das Security-Secret nicht ohne Migrationsplanung ändern, da offene Deployment-Tokens danach nicht mehr entschlüsselbar sind.</div>
+    </section>
+
+    <section id="security" class="panel doc-section">
+      <p class="eyebrow">12</p><h2>Sicherheitsmodell</h2>
+      <ul><li>TLS, HSTS, restriktive Security-Header und Hostheader-Prüfung.</li><li>Scrypt-Passworthashes, serverseitige Sitzungen, HttpOnly/Secure/SameSite-Cookies und CSRF-Schutz.</li><li>Login-Limitierung pro Quell-IP und getrennte Rollen.</li><li>Deployment-Tokens: kurzlebig, einmalig, Prüfdigest plus verschlüsselter Wiederabruf.</li><li>Agent-Tokens werden ausschließlich als SHA-256-Digest gespeichert.</li><li>Pro Client ein passwortgesperrtes, isoliertes Linux-Zielkonto mit restriktivem SSH-Key.</li><li>Privater SSH-Schlüssel verlässt niemals die Quelle; Ziel-Host-Key ist gepinnt.</li><li>Backup Explorer und dauerhafte Agentenlogs sind admin-only.</li><li>Agentenlogs sind pro Lauf auf 512 KB begrenzt; typische Geheimnismuster werden beim Empfang redigiert.</li><li>Audit-Log für Login, Benutzerverwaltung, Clientanlage, Agent-Konfiguration, Tokenabruf, Onboarding und Backup-Downloads.</li><li>Portal, Konfiguration und Datenbank laufen root-only mit systemd-Härtung.</li></ul>
+      <p>Ein Portal-Administrator ist eine hoch privilegierte Rolle. Administratorkonten sollten individuelle, lange Passwörter verwenden und deaktiviert werden, sobald sie nicht mehr benötigt werden.</p>
+    </section>
+
+    <section id="restore" class="panel doc-section">
+      <p class="eyebrow">13</p><h2>Wiederherstellung</h2>
+      <div class="callout"><strong>Restore ist bewusst kein automatischer Portal-Button.</strong> Eine Wiederherstellung verändert Produktivdaten und muss immer zielgerichtet, geprüft und protokolliert erfolgen.</div>
+      <h3>Dateisystem</h3><ol><li>Gewünschte Run-ID und gültige <code>.backup-ok</code> prüfen. Bei <code>sync</code> liegt ausschließlich der aktuelle Stand unter <code>current/</code>.</li><li>Manifest, Policy-Snapshot, Quelle, Modus, Zeitstempel und Volumen plausibilisieren.</li><li>Snapshots per rsync, Tar-Archive per <code>zstd -dc | tar -xf -</code> zunächst in ein separates Staging-Verzeichnis wiederherstellen.</li><li>Eigentümer, Gruppen, ACLs, Extended Attributes und Symlinks kontrollieren.</li><li>Erst danach ausgewählte Pfade in die Produktion übernehmen.</li></ol>
+      <h3>MariaDB</h3><ol><li>Benötigte Schema- und Datenarchive in ein Restore-Staging kopieren.</li><li>Mit <code>zstd -t</code> testen und mit <code>zstd -dc</code> entpacken.</li><li>Schema vor Daten importieren; bei Tabellen-Fallback alle Tabellenfiles berücksichtigen.</li><li>Benutzer und Grants separat und erst nach manueller Prüfung einspielen.</li><li>Anwendungskonsistenz und Rechte anschließend testen.</li></ol>
+      <pre><code>zstd -t schema.sql.zst
+zstd -dc schema.sql.zst | mariadb
+zstd -dc data.sql.zst | mariadb</code></pre>
+      <p>Vor einem Restore in eine bestehende Datenbank immer ein zusätzliches aktuelles Sicherungsabbild erstellen.</p>
+    </section>
+
+    <section id="troubleshooting" class="panel doc-section">
+      <p class="eyebrow">14</p><h2>Fehleranalyse</h2>
+      <table class="doc-table"><thead><tr><th>Symptom</th><th>Prüfung</th></tr></thead><tbody><tr><td>Portal nicht erreichbar</td><td><code>systemctl status backup-portal</code>, <code>journalctl -u backup-portal</code>, UFW, Listener und <code>/livez</code>.</td></tr><tr><td><code>/livez</code> OK, <code>/readyz</code> 503</td><td>JSON-Feld <code>checks</code> lesen; DB, Home, Scheduler, Checker-Worker/-Dateien, Agent-Assets oder Tokenverschlüsselung reparieren.</td></tr><tr><td>Checker bleibt QUEUED/RUNNING</td><td>Checker-Laufdetail und <code>journalctl -u backup-portal</code> prüfen. Nach einem Portal-Neustart wird ein unterbrochener Lauf explizit als <code>INTERRUPTED</code> markiert.</td></tr><tr><td>Agent OFFLINE</td><td>Minütlichen Cron, <code>--poll</code>, HTTPS-Verbindung und Agent-Token prüfen. Während eines aktiven Backups ist ein ausbleibender Poll erwartbar; RUNNING bleibt sichtbar.</td></tr><tr><td>Auftrag bleibt QUEUED</td><td>Agent-Online-Status und <code>/var/log/raven-backup.log</code> prüfen.</td></tr><tr><td>Curl-Token ungültig</td><td>Token verwendet, widerrufen oder abgelaufen; im Clientdetail einen neuen Befehl erzeugen.</td></tr><tr><td>Hostname geändert</td><td><code>hostname -f</code> prüfen und Client kontrolliert neu onboarden.</td></tr><tr><td>SSH-Preflight schlägt fehl</td><td>Port {{ ssh_port }}, UFW/Egress, SSH-Alias, Benutzer, Ziel-Hostname und gepinnten Host-Key prüfen.</td></tr><tr><td>MariaDB fehlt</td><td><code>command -v mariadb mariadb-dump</code>; ohne Installation wird der Client als Dateisystem-only konfiguriert.</td></tr><tr><td>Zu wenig Zielspeicher</td><td>Checker-Speicherstatus und Cleanup-Dry-Run prüfen; nie unkontrolliert Snapshots löschen.</td></tr><tr><td>Backup bleibt RUNNING</td><td>Quellprozess, internen Lock, Log, laufenden Dump/rsync und <code>.partial</code>-Dateien kontrollieren.</td></tr><tr><td>Keine Mail</td><td>Mailoption des Clients, SMTP-Prüfung im Checker und Agent-/Portallog prüfen.</td></tr></tbody></table>
+    </section>
+
+    <section id="checklist" class="panel doc-section">
+      <p class="eyebrow">15</p><h2>Betriebschecklisten</h2>
+      <h3>Nach neuem Onboarding</h3><ul class="check-list"><li>Heartbeat im Portal vorhanden</li><li>Agent nach spätestens zwei Minuten ONLINE</li><li>Minütlicher Poll-Cron genau einmal eingetragen</li><li>Preflight ohne Warnung</li><li>Portal-Trigger durchläuft QUEUED, RUNNING und SUCCESS</li><li><code>.backup-ok</code> und Manifest vorhanden</li><li>Volumen und Klassifizierungen plausibel</li><li>Checkerstatus OK</li><li>Mailoption wie gewünscht</li></ul>
+      <h3>Regelmäßig</h3><ul class="check-list"><li>Keine STALE-/ERROR-Clients ungeklärt</li><li>Freier Speicher oberhalb der Schwelle</li><li>Cleanup-Report plausibel</li><li>TLS-Zertifikat gültig</li><li>Portalbenutzer und Rollen aktuell</li><li>Restore-Stichprobe dokumentiert</li></ul>
+    </section>
+  </article>
+</div>
+{% endblock %}

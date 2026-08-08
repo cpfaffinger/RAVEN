@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Deployment-Token · RAVEN{% endblock %}
+{% block content %}
+<ol class="onboarding-steps"><li class="done"><span>1</span><strong>Zielkonto</strong><small>{{ client.username }}</small></li><li class="active"><span>2</span><strong>Deployment</strong><small>Curl ausführen</small></li><li><span>3</span><strong>Prüfung</strong><small>Ergebnis kontrollieren</small></li></ol>
+<div class="page-head"><div><p class="eyebrow">Schritt 2 von 3</p><h1>{{ client.slug }} onboarden</h1><p class="muted">Der aktuelle Befehl kann bis zur Nutzung oder bis {{ expires_at or ('in ' ~ minutes ~ ' Minuten') }} erneut über diese Seite aufgerufen werden.</p></div></div>
+{% if command %}
+<section class="panel token-panel">
+  <div class="alert warning"><strong>Sensibler Einmal-Befehl.</strong> Nur als root auf dem vorgesehenen Quellserver ausführen. Das Token ist verschlüsselt gespeichert und wird nach erfolgreicher Registrierung ungültig.</div>
+  <div class="prereq-grid"><div><strong>1. Voraussetzungen</strong><span>Als root anmelden; curl und Python 3 müssen vorhanden sein.</span></div><div><strong>2. Ausführen</strong><span>Den kompletten Befehl unverändert auf der vorgesehenen Quelle starten.</span></div><div><strong>3. Verifizieren</strong><span>Auf dieser Seite zu den Details zurückkehren und Heartbeat beziehungsweise SUCCESS prüfen.</span></div></div>
+  <label>Curl-Befehl<textarea id="deployment-command" rows="6" readonly>{{ command }}</textarea></label>
+  <div class="actions split-actions"><button type="button" class="primary" data-copy-target="deployment-command">Befehl kopieren</button><span class="copy-result" aria-live="polite"></span></div>
+  <p><strong>{% if start_immediately %}Der erste vollständige Backup-Lauf startet automatisch.{% else %}Agent, SSH und Cron werden installiert; das Backup startet nach Zeitplan.{% endif %}</strong></p>
+  <details><summary>Was der Assistent automatisch erledigt</summary><ul><li>Ed25519-Schlüssel ausschließlich auf der Quelle erzeugen</li><li>Öffentlichen Schlüssel dem isolierten Zielkonto zuordnen</li><li>Aktuelles Backup-Script und root-only TOML-Konfiguration installieren</li><li>SSH-Host-Key fixieren, Verbindung und Hostnamen prüfen</li><li>Bestehenden Backup-Cron kontrolliert durch den verwalteten Cron-Block ersetzen</li><li>Preflight und Portal-Heartbeat ausführen</li></ul></details>
+  <div class="actions"><a class="primary button" href="/clients/{{ client.id }}">Zu Schritt 3: Status prüfen</a><form method="post" action="/clients/{{ client.id }}/deployment/revoke"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary">Befehl widerrufen</button></form></div>
+</section>
+{% else %}
+<section class="panel token-panel"><div class="alert error"><strong>Kein aktiver Curl-Befehl.</strong> Das Token wurde bereits verwendet, widerrufen oder ist abgelaufen.</div><a class="primary button" href="/clients/{{ client.id }}">Neuen Befehl erzeugen</a></section>
+{% endif %}
+{% endblock %}

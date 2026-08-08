@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Anmelden · RAVEN{% endblock %}
+{% block content %}
+<section class="login-card">
+  <div class="brand-mark large">R</div>
+  <p class="eyebrow">Backup Orchestration</p>
+  <h1>RAVEN</h1>
+  <p><strong>Recovery, Archiving, Verification, Events &amp; Notification</strong></p>
+  <p class="muted">RAVEN wacht über Backups, Wiederherstellung, Prüfung und Benachrichtigung.</p>
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login" class="stack">
+    <label>Benutzername<input name="username" autocomplete="username" required autofocus></label>
+    <label>Passwort<input type="password" name="password" autocomplete="current-password" required></label>
+    <button class="primary" type="submit">Sicher anmelden</button>
+  </form>
+</section>
+{% endblock %}

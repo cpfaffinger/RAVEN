@@ -1,0 +1,66 @@
+[domain]
+tld = "example.com"
+subdomain = "backup"
+
+[server]
+host = "0.0.0.0"
+port = 49180
+tls_cert = "/etc/letsencrypt/live/backup.example.com/fullchain.pem"
+tls_key = "/etc/letsencrypt/live/backup.example.com/privkey.pem"
+
+[acme]
+mode = "dns-cloudflare"
+email = "admin@example.com"
+state_dir = "/var/lib/backup-portal/acme"
+lock_path = "/run/backup-portal-acme.lock"
+hook = "/opt/backup-portal/acme_dns_hook.py"
+python = "/opt/backup-portal/venv/bin/python"
+certbot = "/usr/bin/certbot"
+propagation_timeout_seconds = 7200
+poll_interval_seconds = 15
+resolvers = ["1.1.1.1", "8.8.8.8"]
+
+[acme.cloudflare]
+credentials_file = "/etc/backup-portal/cloudflare-acme.toml"
+zone_id = ""
+ttl = 60
+
+[database]
+path = "/var/lib/backup-portal/portal.db"
+
+[paths]
+backup_script = "/opt/backup-portal/assets/backup_job.py"
+bootstrap_script = "/opt/backup-portal/assets/bootstrap_agent.py"
+checker_state = "/var/lib/backup-check/state.json"
+home_root = "/home"
+
+[checker]
+enabled = true
+interval_minutes = 60
+timeout_seconds = 1800
+script = "/opt/backup-portal/checker/backup_check.py"
+config = "/etc/backup-portal/backup-check.toml"
+
+[onboarding]
+username_prefix = "backup_"
+backup_ssh_port = 49150
+remote_hostname = "backup"
+deployment_token_minutes = 15
+default_schedule_hour = 2
+default_schedule_minute = 0
+min_remote_free_bytes = 21474836480
+database_split_threshold_bytes = 2147483648
+
+[security]
+session_hours = 12
+session_secret = "CHANGE_ME_RANDOM_HEX"
+
+[smtp]
+host = "smtp.example.com"
+port = 25
+username = "backup-notification"
+password = "CHANGE_ME"
+from_address = "backup@example.com"
+to = ["admin@example.com"]
+starttls = false
+timeout_seconds = 20

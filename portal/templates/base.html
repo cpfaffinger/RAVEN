@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}RAVEN{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/deploy.css">
+  <link rel="stylesheet" href="/static/manual.css">
+  <link rel="stylesheet" href="/static/explorer.css">
+  <link rel="stylesheet" href="/static/checker.css">
+  <link rel="stylesheet" href="/static/agent-logs.css">
+  <link rel="stylesheet" href="/static/certificates.css">
+  <script defer src="/static/onboarding.js"></script>
+</head>
+<body>
+{% if user %}
+<header class="topbar">
+  <a class="brand" href="/" title="Recovery, Archiving, Verification, Events &amp; Notification"><span class="brand-mark">R</span><span>RAVEN</span></a>
+  <nav>
+    <a href="/">Übersicht</a><a href="/checker">Checker</a><a href="/manual">Handbuch</a>
+    <a href="/policies">Policies</a>{% if user.role == 'admin' %}<a href="/settings/smtp">SMTP</a><a href="/certificates">Zertifikate</a><a href="/explorer">Explorer</a><a href="/clients/new">Server onboarden</a><a href="/users">Benutzer</a>{% endif %}
+    <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link-button">Abmelden</button></form>
+  </nav>
+</header>
+{% endif %}
+<main class="shell {% if not user %}auth-shell{% endif %}">{% block content %}{% endblock %}</main>
+</body>
+</html>
