@@ -863,10 +863,13 @@ to = []
 starttls = false
 timeout_seconds = 20
 
+# Mailausloeser verwaltet das Portal unter "Checker" und uebergibt sie je Lauf.
 [alerts]
 state_file = "${CHECKER_DATA_DIR}/state.json"
 reminder_hours = 24
-send_recovery = true
+mail_on_problem = true
+mail_on_recovery = true
+mail_on_clean_run = false
 
 [storage]
 enabled = true

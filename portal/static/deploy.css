@@ -126,6 +126,10 @@
 .control-facts .offline { color: var(--warn); }
 .status.queued, .status.claimed { background: #e7eef8; color: #315d91; }
 .status.satisfied, .status.skipped { background: #edf2f4; color: #526772; }
+.status.agent-current { background: #e2f4ed; color: var(--good); }
+.status.agent-outdated { background: #e7eef8; color: #315d91; }
+.status.agent-legacy, .status.agent-offline { background: #fff0d6; color: var(--warn); }
+.status.agent-unconverted { background: #fae5e5; color: var(--bad); }
 .control-panel .force-option { display: flex; align-items: center; gap: .45rem; font-size: 12px; margin-bottom: .6rem; }
 .control-panel .force-option input { width: auto; }
 

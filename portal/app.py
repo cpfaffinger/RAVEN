@@ -221,11 +221,46 @@ def migrate_policy_schedule(
             "UPDATE backup_policies SET schedule_hour=?,schedule_minute=? WHERE id=?",
             (int(legacy["schedule_hour"]), int(legacy["schedule_minute"]), policy["id"]),
         )
-    for column in ("schedule_hour", "schedule_minute"):
+    drop_legacy_client_columns(connection, "schedule_hour", "schedule_minute")
+
+
+def drop_legacy_client_columns(connection: sqlite3.Connection, *columns: str) -> None:
+    for column in columns:
         try:
             connection.execute(f"ALTER TABLE clients DROP COLUMN {column}")
         except sqlite3.OperationalError:
             LOG.warning("Historische Spalte clients.%s konnte nicht entfernt werden", column)
+
+
+def migrate_policy_notifications(
+    connection: sqlite3.Connection, policy_columns: set[str], client_columns: set[str]
+) -> None:
+    """Move the mail events from the individual client onto its policy.
+
+    Which events deserve a mail is a property of how a group of servers is
+    supervised, so it belongs next to the schedule on the policy.
+    """
+    if "mail_on_success" in policy_columns:
+        return
+    connection.execute("ALTER TABLE backup_policies ADD COLUMN mail_on_success INTEGER NOT NULL DEFAULT 1")
+    connection.execute("ALTER TABLE backup_policies ADD COLUMN mail_on_failure INTEGER NOT NULL DEFAULT 1")
+    connection.execute("ALTER TABLE backup_policies ADD COLUMN mail_on_skipped INTEGER NOT NULL DEFAULT 0")
+    if not {"mail_on_success", "mail_on_failure"} <= client_columns:
+        return
+    for policy in connection.execute("SELECT id FROM backup_policies").fetchall():
+        legacy = connection.execute(
+            "SELECT mail_on_success,mail_on_failure FROM clients WHERE policy_id=? "
+            "GROUP BY mail_on_success,mail_on_failure ORDER BY COUNT(*) DESC,mail_on_success DESC,mail_on_failure DESC "
+            "LIMIT 1",
+            (policy["id"],),
+        ).fetchone()
+        if not legacy:
+            continue
+        connection.execute(
+            "UPDATE backup_policies SET mail_on_success=?,mail_on_failure=? WHERE id=?",
+            (int(legacy["mail_on_success"]), int(legacy["mail_on_failure"]), policy["id"]),
+        )
+    drop_legacy_client_columns(connection, "mail_on_success", "mail_on_failure")
 
 
 def init_db() -> None:
@@ -247,8 +282,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS clients (
               id INTEGER PRIMARY KEY, slug TEXT UNIQUE NOT NULL, username TEXT UNIQUE NOT NULL,
               source_hostname TEXT, home_path TEXT NOT NULL,
-              mail_on_success INTEGER NOT NULL DEFAULT 1,
-              mail_on_failure INTEGER NOT NULL DEFAULT 1, run_initial_backup INTEGER NOT NULL DEFAULT 0,
+              run_initial_backup INTEGER NOT NULL DEFAULT 0,
               imported INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,
               policy_id INTEGER REFERENCES backup_policies(id), agent_token_hash TEXT,
               agent_log_level TEXT NOT NULL DEFAULT 'INFO',
@@ -281,6 +315,9 @@ def init_db() -> None:
               schedule_hour INTEGER NOT NULL DEFAULT 2,
               schedule_minute INTEGER NOT NULL DEFAULT 0,
               interval_hours INTEGER NOT NULL DEFAULT 24,
+              mail_on_success INTEGER NOT NULL DEFAULT 1,
+              mail_on_failure INTEGER NOT NULL DEFAULT 1,
+              mail_on_skipped INTEGER NOT NULL DEFAULT 0,
               active INTEGER NOT NULL DEFAULT 1,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
@@ -323,6 +360,10 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS checker_settings (
               id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1,
               interval_minutes INTEGER NOT NULL DEFAULT 60, next_run_at TEXT NOT NULL,
+              mail_on_problem INTEGER NOT NULL DEFAULT 1,
+              mail_on_recovery INTEGER NOT NULL DEFAULT 1,
+              mail_on_clean_run INTEGER NOT NULL DEFAULT 0,
+              reminder_hours INTEGER NOT NULL DEFAULT 24,
               updated_by INTEGER REFERENCES users(id), updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS smtp_settings (
@@ -454,6 +495,7 @@ def init_db() -> None:
             connection.execute("ALTER TABLE backup_policies ADD COLUMN mariadb_users_enabled INTEGER NOT NULL DEFAULT 1")
             connection.execute("UPDATE backup_policies SET mariadb_users_enabled=mariadb_enabled")
         migrate_policy_schedule(connection, policy_columns, client_columns, portal_defaults)
+        migrate_policy_notifications(connection, policy_columns, client_columns)
         default_policy = connection.execute(
             "SELECT id,name FROM backup_policies WHERE name IN ('Standard Zstd Archive','Standard Snapshot') "
             "ORDER BY (name='Standard Zstd Archive') DESC LIMIT 1"
@@ -528,6 +570,16 @@ def init_db() -> None:
         checker_defaults = CONFIG.get("checker", {})
         checker_interval = max(5, min(1440, int(checker_defaults.get("interval_minutes", 60))))
         checker_enabled = bool(checker_defaults.get("enabled", True))
+        checker_columns = {row[1] for row in connection.execute("PRAGMA table_info(checker_settings)")}
+        checker_alert_defaults = {
+            "mail_on_problem": "INTEGER NOT NULL DEFAULT 1",
+            "mail_on_recovery": "INTEGER NOT NULL DEFAULT 1",
+            "mail_on_clean_run": "INTEGER NOT NULL DEFAULT 0",
+            "reminder_hours": "INTEGER NOT NULL DEFAULT 24",
+        }
+        for column, definition in checker_alert_defaults.items():
+            if column not in checker_columns:
+                connection.execute(f"ALTER TABLE checker_settings ADD COLUMN {column} {definition}")
         connection.execute(
             "INSERT OR IGNORE INTO checker_settings(id,enabled,interval_minutes,next_run_at,updated_at) VALUES(1,?,?,?,?)",
             (
@@ -847,6 +899,9 @@ def policy_payload(connection: sqlite3.Connection, policy_id: int | None) -> dic
         "schedule_hour": int(policy["schedule_hour"]),
         "schedule_minute": int(policy["schedule_minute"]),
         "interval_hours": int(policy["interval_hours"]),
+        "mail_on_success": bool(policy["mail_on_success"]),
+        "mail_on_failure": bool(policy["mail_on_failure"]),
+        "mail_on_skipped": bool(policy["mail_on_skipped"]),
         "paths": [dict(row) for row in paths],
     }
 
@@ -1023,6 +1078,20 @@ def checker_age_limits() -> dict[str, float]:
     return limits
 
 
+def checker_alert_settings() -> dict[str, Any]:
+    """Return the portal-managed mail triggers of the checker."""
+    with db() as connection:
+        row = connection.execute("SELECT * FROM checker_settings WHERE id=1").fetchone()
+    if not row:
+        return {}
+    return {
+        "mail_on_problem": bool(row["mail_on_problem"]),
+        "mail_on_recovery": bool(row["mail_on_recovery"]),
+        "mail_on_clean_run": bool(row["mail_on_clean_run"]),
+        "reminder_hours": int(row["reminder_hours"]),
+    }
+
+
 def execute_checker_run(run: sqlite3.Row) -> None:
     flags = {
         "normal": ["--verbose"],
@@ -1038,6 +1107,8 @@ def execute_checker_run(run: sqlite3.Row) -> None:
         payload_paths.append(smtp_path)
         schedule_path = write_run_payload("schedule", run, checker_age_limits())
         payload_paths.append(schedule_path)
+        alerts_path = write_run_payload("alerts", run, checker_alert_settings())
+        payload_paths.append(alerts_path)
         command = [
             sys.executable,
             str(CHECKER_SCRIPT),
@@ -1047,6 +1118,8 @@ def execute_checker_run(run: sqlite3.Row) -> None:
             str(smtp_path),
             "--schedule-json-file",
             str(schedule_path),
+            "--alerts-json-file",
+            str(alerts_path),
             *flags[str(run["mode"])],
         ]
         process = subprocess.run(
@@ -1781,16 +1854,59 @@ def logout(request: Request, csrf_token: str = Form(...)):
     return response
 
 
+def agent_state(client: dict[str, Any], current_script_digest: str) -> dict[str, Any]:
+    """Classify how far a source server has been converted to the RAVEN agent.
+
+    The rank orders the states from "needs attention" to "done" so the overview
+    can be sorted by conversion progress.
+    """
+    if not client.get("agent_token_hash"):
+        return {
+            "state": "unconverted", "label": "NICHT UMGERÜSTET", "rank": 0,
+            "hint": "Noch kein Agent onboarded; Curl-Deployment ausstehend",
+        }
+    last_poll = parsed_timestamp(client.get("last_poll_at"))
+    if not last_poll or (datetime.now().astimezone() - last_poll).total_seconds() > 180:
+        return {
+            "state": "offline", "label": "OFFLINE", "rank": 1,
+            "hint": f"Letzter Poll {client.get('last_poll_at') or 'nie'}",
+        }
+    reported = str(client.get("agent_script_sha256") or "")
+    if not reported:
+        return {
+            "state": "legacy", "label": "ALTER AGENT", "rank": 2,
+            "hint": "Agent meldet keine Skriptversion; einmalig neu ausrollen",
+        }
+    if current_script_digest and reported != current_script_digest:
+        return {
+            "state": "outdated", "label": "AKTUALISIERT SICH", "rank": 3,
+            "hint": "Neues Agent-Skript wird beim nächsten Poll übernommen",
+        }
+    return {"state": "current", "label": "AKTUELL", "rank": 4, "hint": "Agent online und auf Portalstand"}
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, sort: str = "server", direction: str = "asc"):
     require_user(request)
-    sort = sort if sort in {"server", "volume"} else "server"
+    sort = sort if sort in {"server", "volume", "agent"} else "server"
     direction = direction if direction in {"asc", "desc"} else "asc"
     checks = checker_results()
     with db() as connection:
         clients = [dict(row) for row in connection.execute("SELECT * FROM clients ORDER BY slug").fetchall()]
+    try:
+        current_script_digest = agent_script_asset()[0]
+    except OSError:
+        current_script_digest = ""
     counts = {"OK": 0, "STALE": 0, "ERROR": 0, "UNKNOWN": 0}
+    pending_agents = 0
     for client in clients:
+        agent = agent_state(client, current_script_digest)
+        client["agent_state"] = agent["state"]
+        client["agent_label"] = agent["label"]
+        client["agent_hint"] = agent["hint"]
+        client["agent_rank"] = agent["rank"]
+        if agent["state"] != "current":
+            pending_agents += 1
         result = checks.get(client["username"], {}).get("result", {})
         try:
             agent_payload = json.loads(client.get("last_payload") or "{}")
@@ -1825,12 +1941,21 @@ def dashboard(request: Request, sort: str = "server", direction: str = "asc"):
         known.sort(key=lambda client: client["volume_bytes"], reverse=direction == "desc")
         unknown.sort(key=lambda client: client["slug"])
         clients = known + unknown
+    elif sort == "agent":
+        clients.sort(key=lambda client: client["slug"])
+        clients.sort(key=lambda client: client["agent_rank"], reverse=direction == "desc")
     else:
         clients.sort(key=lambda client: client["slug"], reverse=direction == "desc")
     return render(
         request,
         "dashboard.html",
-        {"clients": clients, "counts": counts, "sort": sort, "direction": direction},
+        {
+            "clients": clients,
+            "counts": counts,
+            "pending_agents": pending_agents,
+            "sort": sort,
+            "direction": direction,
+        },
     )
 
 
@@ -1850,6 +1975,7 @@ def checker_page(request: Request):
         statuses[status if status in statuses else "UNKNOWN"] += 1
     return render(request, "checker.html", {
         "settings": dict(settings),
+        "checker_mail_summary": checker_mail_summary(settings),
         "runs": runs,
         "statuses": statuses,
         "state_updated": datetime.fromtimestamp(CHECKER_STATE.stat().st_mtime).astimezone().isoformat(timespec="seconds")
@@ -1863,20 +1989,36 @@ def checker_page(request: Request):
 def checker_settings_update(
     request: Request,
     interval_minutes: int = Form(...),
+    reminder_hours: int = Form(24),
     enabled: str | None = Form(None),
+    mail_on_problem: str | None = Form(None),
+    mail_on_recovery: str | None = Form(None),
+    mail_on_clean_run: str | None = Form(None),
     csrf_token: str = Form(...),
 ):
     user = require_user(request, admin=True)
     verify_csrf(user, csrf_token)
     if not 5 <= interval_minutes <= 1440:
         raise HTTPException(400, "Checker-Intervall muss zwischen 5 und 1440 Minuten liegen")
+    if not 1 <= reminder_hours <= 720:
+        raise HTTPException(400, "Erinnerungsabstand muss zwischen 1 und 720 Stunden liegen")
     with db() as connection:
         connection.execute(
-            "UPDATE checker_settings SET enabled=?,interval_minutes=?,next_run_at=?,updated_by=?,updated_at=? WHERE id=1",
-            (bool(enabled), interval_minutes, checker_next_time(interval_minutes), user["id"], now_iso()),
+            "UPDATE checker_settings SET enabled=?,interval_minutes=?,next_run_at=?,mail_on_problem=?,"
+            "mail_on_recovery=?,mail_on_clean_run=?,reminder_hours=?,updated_by=?,updated_at=? WHERE id=1",
+            (
+                bool(enabled), interval_minutes, checker_next_time(interval_minutes),
+                bool(mail_on_problem), bool(mail_on_recovery), bool(mail_on_clean_run),
+                reminder_hours, user["id"], now_iso(),
+            ),
         )
     CHECKER_WAKEUP.set()
-    audit(request, "checker.settings", "portal-checker", f"enabled={bool(enabled)}, interval={interval_minutes}", user_id=user["id"])
+    audit(
+        request, "checker.settings", "portal-checker",
+        f"enabled={bool(enabled)}, interval={interval_minutes}, problem={bool(mail_on_problem)}, "
+        f"recovery={bool(mail_on_recovery)}, clean={bool(mail_on_clean_run)}, reminder={reminder_hours}",
+        user_id=user["id"],
+    )
     return RedirectResponse("/checker", status_code=303)
 
 
@@ -2377,6 +2519,36 @@ def active_policies() -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def checker_mail_summary(settings: sqlite3.Row) -> str:
+    """Name the check results the checker sends mail for."""
+    events = [
+        label
+        for column, label in (
+            ("mail_on_problem", "Probleme"),
+            ("mail_on_recovery", "Wiederherstellung"),
+            ("mail_on_clean_run", "fehlerfreier Lauf"),
+        )
+        if settings[column]
+    ]
+    if not events:
+        return "keine"
+    return f"{', '.join(events)} · Erinnerung alle {int(settings['reminder_hours'])} h"
+
+
+def policy_mail_summary(policy: sqlite3.Row) -> str:
+    """Name the backup events a policy sends mail for."""
+    events = [
+        label
+        for column, label in (
+            ("mail_on_success", "Erfolg"),
+            ("mail_on_failure", "Fehler"),
+            ("mail_on_skipped", "Ablehnung"),
+        )
+        if policy[column]
+    ]
+    return ", ".join(events) if events else "keine"
+
+
 def validated_schedule(hour: Any, minute: Any, interval_hours: Any) -> tuple[int, int, int]:
     try:
         return (
@@ -2422,6 +2594,7 @@ def policies_page(request: Request):
                 )
                 for policy in policies
             },
+            "mail_summaries": {policy["id"]: policy_mail_summary(policy) for policy in policies},
             "interval_choices": backup_schedule.INTERVAL_CHOICES,
             "defaults": defaults,
             "message": request.query_params.get("message", ""),
@@ -2439,6 +2612,9 @@ def policy_create(
     interval_hours: int = Form(...),
     mariadb_databases_enabled: str | None = Form(None),
     mariadb_users_enabled: str | None = Form(None),
+    mail_on_success: str | None = Form(None),
+    mail_on_failure: str | None = Form(None),
+    mail_on_skipped: str | None = Form(None),
     csrf_token: str = Form(...),
 ):
     user = require_user(request, admin=True)
@@ -2455,10 +2631,12 @@ def policy_create(
             users_enabled = bool(mariadb_users_enabled)
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
-                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,"
+                "mail_on_success,mail_on_failure,mail_on_skipped,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
+                 bool(mail_on_success), bool(mail_on_failure), bool(mail_on_skipped),
                  now_iso(), now_iso()),
             )
             policy_id = cursor.lastrowid
@@ -2512,6 +2690,9 @@ def policy_update(
     interval_hours: int = Form(...),
     mariadb_databases_enabled: str | None = Form(None),
     mariadb_users_enabled: str | None = Form(None),
+    mail_on_success: str | None = Form(None),
+    mail_on_failure: str | None = Form(None),
+    mail_on_skipped: str | None = Form(None),
     csrf_token: str = Form(...),
 ):
     user = require_user(request, admin=True)
@@ -2531,9 +2712,10 @@ def policy_update(
             connection.execute(
                 "UPDATE backup_policies SET name=?,description=?,mariadb_enabled=?,"
                 "mariadb_databases_enabled=?,mariadb_users_enabled=?,schedule_hour=?,schedule_minute=?,"
-                "interval_hours=?,updated_at=? WHERE id=?",
+                "interval_hours=?,mail_on_success=?,mail_on_failure=?,mail_on_skipped=?,updated_at=? WHERE id=?",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
+                 bool(mail_on_success), bool(mail_on_failure), bool(mail_on_skipped),
                  now_iso(), policy_id),
             )
             connection.execute(
@@ -2675,8 +2857,6 @@ def client_create(
     slug: str = Form(...),
     source_hostname: str = Form(""),
     policy_id: int = Form(...),
-    mail_on_success: str | None = Form(None),
-    mail_on_failure: str | None = Form(None),
     agent_log_level: str = Form("INFO"),
     agent_log_local: str | None = Form(None),
     agent_log_portal: str | None = Form(None),
@@ -2715,12 +2895,12 @@ def client_create(
     with db() as connection:
         cursor = connection.execute(
             "INSERT INTO clients(slug,username,source_hostname,home_path,policy_id,"
-            "mail_on_success,mail_on_failure,agent_log_level,agent_log_local,agent_log_portal,"
+            "agent_log_level,agent_log_local,agent_log_portal,"
             "agent_log_traceback,agent_log_max_bytes,run_initial_backup,agent_config_updated_at,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 slug, username, source_hostname or None, str(home), policy_id,
-                bool(mail_on_success), bool(mail_on_failure), agent_log_level, bool(agent_log_local),
+                agent_log_level, bool(agent_log_local),
                 bool(agent_log_portal), bool(agent_log_traceback), agent_log_max_kb * 1024,
                 bool(run_initial_backup), now_iso(), now_iso(),
             ),
@@ -2795,6 +2975,7 @@ def client_detail(request: Request, client_id: int):
             "backup_running": backup_running,
             "policy": dict(policy) if policy else None,
             "policy_paths": policy_paths,
+            "policy_mail_summary": policy_mail_summary(policy) if policy else "unbekannt",
             "policies": policies,
             "schedule": schedule_state,
             "message": request.query_params.get("message", ""),
@@ -2806,8 +2987,6 @@ def client_detail(request: Request, client_id: int):
 def client_agent_config_update(
     request: Request,
     client_id: int,
-    mail_on_success: str | None = Form(None),
-    mail_on_failure: str | None = Form(None),
     agent_log_level: str = Form("INFO"),
     agent_log_local: str | None = Form(None),
     agent_log_portal: str | None = Form(None),
@@ -2822,11 +3001,11 @@ def client_agent_config_update(
         raise HTTPException(400, "Ungueltige Agent-Konfiguration")
     with db() as connection:
         updated = connection.execute(
-            "UPDATE clients SET mail_on_success=?,mail_on_failure=?,agent_log_level=?,agent_log_local=?,"
+            "UPDATE clients SET agent_log_level=?,agent_log_local=?,"
             "agent_log_portal=?,agent_log_traceback=?,agent_log_max_bytes=?,"
             "agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE id=?",
             (
-                bool(mail_on_success), bool(mail_on_failure), level, bool(agent_log_local),
+                level, bool(agent_log_local),
                 bool(agent_log_portal), bool(agent_log_traceback), agent_log_max_kb * 1024,
                 now_iso(), client_id,
             ),
@@ -3125,9 +3304,10 @@ def build_agent_config(client: sqlite3.Row, source_hostname: str, has_mariadb: b
     portal_url = str(onboarding["public_base_url"]).rstrip('/')
     mariadb_databases = has_mariadb and policy["mariadb_databases_enabled"]
     mariadb_users = has_mariadb and policy["mariadb_users_enabled"]
-    mail_on_success = bool(client["mail_on_success"]) and bool(smtp["enabled"])
-    mail_on_failure = bool(client["mail_on_failure"]) and bool(smtp["enabled"])
-    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{onboarding['fqdn']}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\nstate_path = "/var/lib/raven-backup/agent-{client['slug']}.json"\n{empty_sources_config}\n{path_config}\n[schedule]\nhour = {int(policy['schedule_hour'])}\nminute = {int(policy['schedule_minute'])}\ninterval_hours = {int(policy['interval_hours'])}\n\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = "{smtp['username']}"\npassword = "{smtp['password']}"\nfrom_address = "{smtp['from_address']}"\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
+    mail_on_success = bool(policy["mail_on_success"]) and bool(smtp["enabled"])
+    mail_on_failure = bool(policy["mail_on_failure"]) and bool(smtp["enabled"])
+    mail_on_skipped = bool(policy["mail_on_skipped"]) and bool(smtp["enabled"])
+    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{onboarding['fqdn']}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\nstate_path = "/var/lib/raven-backup/agent-{client['slug']}.json"\n{empty_sources_config}\n{path_config}\n[schedule]\nhour = {int(policy['schedule_hour'])}\nminute = {int(policy['schedule_minute'])}\ninterval_hours = {int(policy['interval_hours'])}\n\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\nmail_on_skipped = {str(mail_on_skipped).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = "{smtp['username']}"\npassword = "{smtp['password']}"\nfrom_address = "{smtp['from_address']}"\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
 
 
 @app.post("/api/onboard/register")

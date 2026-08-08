@@ -16,6 +16,10 @@
       </div>
     </div>
     <div class="form-block">
+      <div><p class="eyebrow">Benachrichtigungen</p><h2>Mail bei welchen Ereignissen</h2><p class="muted">Gilt für die Agenten aller zugewiesenen Server. Empfänger sind die Portal-Benutzer mit aktivierter Mailoption; ist SMTP deaktiviert, versendet der Agent unabhängig davon nichts.</p></div>
+      <div class="checks"><label><input type="checkbox" name="mail_on_success" {% if policy.mail_on_success %}checked{% endif %}> Mail bei erfolgreichem Backup <small>Abschlussbericht mit Volumen, Dauer und Klassifizierungen</small></label><label><input type="checkbox" name="mail_on_failure" {% if policy.mail_on_failure %}checked{% endif %}> Mail bei fehlgeschlagenem Backup <small>Phase, Fehlerklasse und Meldung des abgebrochenen Laufs</small></label><label><input type="checkbox" name="mail_on_skipped" {% if policy.mail_on_skipped %}checked{% endif %}> Mail bei abgelehntem Backup <small>Der Agent hat einen Auftrag abgelehnt, weil das Intervall noch nicht abgelaufen war</small></label></div>
+    </div>
+    <div class="form-block">
       <div><p class="eyebrow">MariaDB</p><h2>Datenbanksicherung</h2><p class="muted">Beide Komponenten lassen sich unabhängig voneinander sichern.</p></div>
       <div class="checks"><label><input type="checkbox" name="mariadb_databases_enabled" {% if policy.mariadb_databases_enabled %}checked{% endif %}> Datenbanken sichern <small>Schemas, Trigger, Routinen, Events und Nutzdaten aller Anwendungsdatenbanken</small></label><label><input type="checkbox" name="mariadb_users_enabled" {% if policy.mariadb_users_enabled %}checked{% endif %}> Datenbankbenutzer und Rechte sichern <small>CREATE USER- und GRANT-Anweisungen, unabhängig von den Datenbanken</small></label></div>
     </div>

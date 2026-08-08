@@ -38,9 +38,11 @@ hour = 2
 minute = 0
 interval_hours = 24
 
+# Wird vom Portal aus der Policy erzeugt.
 [notifications]
 mail_on_success = true
 mail_on_failure = true
+mail_on_skipped = false
 
 [logging]
 level = "INFO"

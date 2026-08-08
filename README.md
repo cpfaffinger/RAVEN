@@ -8,6 +8,7 @@ RAVEN verbindet ein TLS-geschütztes Verwaltungsportal mit einem schlanken Pytho
 
 - Policy-basierte Sicherung von Dateisystempfaden als Current Sync oder persistentes `tar.zst`
 - zentral gepflegte Wunschzeit und Backup-Intervall je Policy, die der Agent bei jedem Abruf live übernimmt
+- je Policy einstellbar, bei welchen Backup-Ereignissen eine Mail entsteht, und je Checker-Lauf, bei welchen Prüfergebnissen
 - MariaDB-Dumps einschließlich optionaler Benutzer und Rechte
 - zentrales Scheduling, Laufstatus, Protokolle, Volumenvergleich, Rotation und Speicherwarnungen
 - Backup Explorer für Verzeichnisse, Zstandard-Archive und einzelne Downloads
@@ -106,7 +107,7 @@ Der Assistent installiert und validiert zuerst sämtliche System- und Python-Abh
 
 Das Admin-Passwort wird verdeckt abgefragt. Das SMTP-Passwort kann bei einer erneuten Installation durch eine leere Eingabe unverändert übernommen werden.
 
-SMTP wird bei der Initialisierung in die eingebettete SQLite-Datenbank übernommen und danach im Webinterface zentral verwaltet; das Passwort ist mit dem Portal-Master-Secret verschlüsselt. Empfänger werden ausschließlich unter **Benutzer** über E-Mail-Adresse und **Mails erhalten** gesteuert. Nur aktive, freigeschaltete Benutzer erhalten Berichte. Checker laden die Liste bei jedem Lauf; Agenten übernehmen Änderungen beim nächsten Poll als atomare Konfigurationsaktualisierung. Beide Versandwege verwenden bewusst ausschließlich Plain-SMTP ohne STARTTLS oder SMTPS.
+SMTP wird bei der Initialisierung in die eingebettete SQLite-Datenbank übernommen und danach im Webinterface zentral verwaltet; das Passwort ist mit dem Portal-Master-Secret verschlüsselt. Empfänger werden ausschließlich unter **Benutzer** über E-Mail-Adresse und **Mails erhalten** gesteuert. Wann überhaupt eine Mail entsteht, steht bei den auslösenden Stellen: Backup-Ereignisse in der Policy, Prüfergebnisse unter **Checker**. Nur aktive, freigeschaltete Benutzer erhalten Berichte. Checker laden die Liste bei jedem Lauf; Agenten übernehmen Änderungen beim nächsten Poll als atomare Konfigurationsaktualisierung. Beide Versandwege verwenden bewusst ausschließlich Plain-SMTP ohne STARTTLS oder SMTPS.
 
 Domain und Onboarding-Werte werden bei der Erstinstallation aus den Assistentenangaben in die eingebettete SQLite-Datenbank übernommen und danach admin-only unter **Konfiguration** verwaltet. Der resultierende FQDN gilt zentral für Portal- und Curl-Links, Agent-Endpunkte, SSH-Onboarding, Trusted Hosts, Let’s Encrypt und die Cloudflare-Zone. Ein Domainwechsel wird zunächst vorgemerkt und erst nach erfolgreicher Ausstellung des passenden Zertifikats atomar aktiviert. Nur Listeneradresse/-port, TLS-Bootstrap-Pfade, Dateipfade und Master-Secret bleiben als bootkritische Werte in der root-only TOML.
 
@@ -219,6 +220,29 @@ Auch das Agent-Skript selbst wird über denselben Kanal aktuell gehalten: Der Ag
 Diese Selbstaktualisierung kann erst greifen, wenn auf der Quelle einmal ein Agent mit dieser Fähigkeit liegt. Quellserver, die noch mit einer älteren Fassung onboarded wurden, brauchen daher genau einmal ein erneutes Deployment über den Curl-Befehl; danach kommen weitere Agentversionen automatisch. Bis dahin bleibt der Zeitplan trotzdem wirksam, weil bereits der zentrale Scheduler nur zum fälligen Termin einen Auftrag erzeugt – die zusätzliche Prüfung auf dem Client fehlt lediglich.
 
 Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem Anderthalbfachen des Intervalls, für den Tagesplan also weiterhin nach 36 Stunden. Ein Eintrag unter `max_age_hours_by_user` in `backup-check.toml` bleibt eine bewusste manuelle Ausnahme und hat Vorrang.
+
+## Benachrichtigungen
+
+Ob eine Mail entsteht, entscheidet die Stelle, die sie auslöst. Empfänger sind in beiden Fällen die aktiven Portal-Benutzer mit hinterlegter Adresse und aktivierter Mailoption; ist SMTP abgeschaltet, versendet keine der beiden Seiten etwas.
+
+Der Agent richtet sich nach der Policy des Servers. Dort lässt sich je Ereignis festlegen:
+
+| Ereignis | Bedeutung | Standard |
+| --- | --- | --- |
+| Erfolgreiches Backup | Abschlussbericht mit Volumen, Dauer und Klassifizierungen | aktiv |
+| Fehlgeschlagenes Backup | Phase, Fehlerklasse und Meldung des abgebrochenen Laufs | aktiv |
+| Abgelehntes Backup | Der Agent hat einen Auftrag abgelehnt, weil das Intervall noch nicht abgelaufen war | aus |
+
+Der zentrale Checker richtet sich nach den Einstellungen unter **Checker**:
+
+| Ergebnis | Bedeutung | Standard |
+| --- | --- | --- |
+| Probleme | Alarm, sobald eine Prüfung von OK abweicht | aktiv |
+| Wiederherstellung | Entwarnung, sobald ein gemeldetes Backup wieder aktuell ist | aktiv |
+| Fehlerfreier Lauf | Vollständiger Bericht auch ohne Befund | aus |
+| Erinnerungsabstand | Abstand, in dem ein weiterhin bestehendes Problem erneut gemeldet wird | 24 Stunden |
+
+Ein Force-Report versendet die Ergebnismail unabhängig von diesen Schaltern, ein Dry-Run versendet nie. Das Portal übergibt die Werte bei jedem Lauf; die Angaben in `backup-check.toml` greifen nur beim direkten Aufruf des Skripts.
 
 ### Updates und Wiederherstellung
 

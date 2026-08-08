@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
         help="Root-only Fristen je Backup-Benutzer aus dem Portal, abgeleitet aus dem Policy-Intervall",
     )
     parser.add_argument(
+        "--alerts-json-file",
+        help="Root-only Mailausloeser des Checkers aus dem Portal",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Vollstaendigen Check ausfuehren und Ergebnis-Mail unabhaengig vom Alarmstatus senden",
@@ -80,12 +84,18 @@ def read_json_override(path_value: str, description: str) -> dict[str, Any]:
 
 
 def load_config(
-    path: str, smtp_json_file: str | None = None, schedule_json_file: str | None = None
+    path: str,
+    smtp_json_file: str | None = None,
+    schedule_json_file: str | None = None,
+    alerts_json_file: str | None = None,
 ) -> dict[str, Any]:
     with open(path, "rb") as handle:
         cfg = tomllib.load(handle)
     if smtp_json_file:
         cfg["smtp"] = read_json_override(smtp_json_file, "SMTP-Override-Datei")
+    if alerts_json_file:
+        # The portal owns the mail triggers; the TOML keeps the state file path.
+        cfg.setdefault("alerts", {}).update(read_json_override(alerts_json_file, "Alarm-Override-Datei"))
     if schedule_json_file:
         # Deadlines follow the policy interval. An explicit entry in the TOML
         # configuration stays a deliberate exception and keeps precedence.
@@ -734,7 +744,7 @@ def main() -> int:
     args = parse_args()
     CONFIG_DISPLAY = args.config
     try:
-        cfg = load_config(args.config, args.smtp_json_file, args.schedule_json_file)
+        cfg = load_config(args.config, args.smtp_json_file, args.schedule_json_file, args.alerts_json_file)
         alerts = cfg["alerts"]
         smtp_enabled = bool(cfg["smtp"].get("enabled", True))
         hostname = socket.gethostname()
@@ -808,7 +818,7 @@ def main() -> int:
             mail_sent = True
             for result in stale:
                 old_users.setdefault(result.user, {})["last_notice"] = now_epoch
-        elif notify_stale and not args.dry_run and smtp_enabled:
+        elif notify_stale and not args.dry_run and smtp_enabled and bool(alerts.get("mail_on_problem", True)):
             send_mail(
                 cfg,
                 f"[Backup-ALARM] {len(stale)} fehlerhafte Backups auf {hostname}",
@@ -818,11 +828,24 @@ def main() -> int:
             mail_sent = True
             for result in notify_stale:
                 old_users.setdefault(result.user, {})["last_notice"] = now_epoch
+        elif (
+            not stale
+            and not args.dry_run
+            and smtp_enabled
+            and bool(alerts.get("mail_on_clean_run", False))
+        ):
+            send_mail(
+                cfg,
+                f"[Backup-OK] Alle {len(results)} Pruefungen sauber auf {hostname}",
+                format_results("Alle Backup-Pruefungen sind aktuell:", results),
+                format_results_html("Backup-Pruefung ohne Befund", results),
+            )
+            mail_sent = True
 
         if (
             not args.force
             and recovered
-            and bool(alerts.get("send_recovery", True))
+            and bool(alerts.get("mail_on_recovery", alerts.get("send_recovery", True)))
             and not args.dry_run
             and smtp_enabled
         ):
@@ -849,8 +872,12 @@ def main() -> int:
         summary = f"check complete: {len(results)} checks, {len(stale)} problems"
         if mail_sent:
             summary += ", notification sent"
-        elif (notify_stale or recovered) and not smtp_enabled:
-            summary += ", notification suppressed (SMTP disabled)"
+        elif (notify_stale or recovered) and not args.dry_run:
+            summary += (
+                ", notification suppressed (SMTP disabled)"
+                if not smtp_enabled
+                else ", notification suppressed (mail trigger disabled)"
+            )
         print(summary)
         return 1 if stale else 0
     except Exception as exc:

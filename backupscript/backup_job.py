@@ -985,7 +985,31 @@ def notifications_enabled(cfg: dict[str, Any], event: str) -> bool:
         return bool(notifications.get("mail_on_success", cfg["backup"].get("notify_on_success", False)))
     if event == "failure":
         return bool(notifications.get("mail_on_failure", True))
+    if event == "skipped":
+        return bool(notifications.get("mail_on_skipped", False))
     raise ValueError(f"unbekannter Benachrichtigungstyp: {event}")
+
+
+def notify_skipped(cfg: dict[str, Any], reason: str) -> None:
+    """Report a refused backup by mail when the policy asks for it."""
+    if not notifications_enabled(cfg, "skipped"):
+        return
+    try:
+        send_mail(
+            cfg,
+            f"[Backup-UEBERSPRUNGEN] {socket.getfqdn()}",
+            "Backup nicht faellig",
+            f"Quelle: {socket.getfqdn()}\nZeit: {datetime.now(timezone.utc).isoformat()}\nGrund: {reason}",
+            success=True,
+            report_rows=[
+                ("Status", "Uebersprungen"),
+                ("Quelle", socket.getfqdn()),
+                ("Backup-Policy", str(cfg["backup"].get("policy_name", "Legacy"))),
+                ("Grund", reason),
+            ],
+        )
+    except Exception:
+        LOG.exception("Mail ueber den uebersprungenen Lauf konnte nicht gesendet werden")
 
 
 def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, Any]:
@@ -1224,6 +1248,7 @@ def main() -> int:
             if not due and not forced:
                 LOG.info("Backup-Auftrag %s abgelehnt: %s", CURRENT_COMMAND_ID, reason)
                 post_command_state(cfg, CURRENT_COMMAND_ID, "skipped", message=f"Intervall nicht abgelaufen: {reason}")
+                notify_skipped(cfg, reason)
                 return 0
             apply_command_policy(cfg, command)
             LOG.info(
@@ -1254,6 +1279,7 @@ def main() -> int:
         due, reason = backup_due(cfg, None)
         if not due and not args.force:
             LOG.info("Backup uebersprungen: %s; mit --force laesst es sich trotzdem starten", reason)
+            notify_skipped(cfg, reason)
             return 0
         attempted = True
         ATTEMPT_STARTED_AT = datetime.now(timezone.utc).isoformat()

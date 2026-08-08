@@ -5,13 +5,35 @@
 <section class="metrics checker-metrics"><article class="good"><span>OK</span><strong>{{ statuses.OK }}</strong></article><article class="warn"><span>Stale</span><strong>{{ statuses.STALE }}</strong></article><article class="bad"><span>Fehler</span><strong>{{ statuses.ERROR }}</strong></article><article><span>Unbekannt</span><strong>{{ statuses.UNKNOWN }}</strong></article></section>
 <section class="detail-grid checker-controls">
   <article class="panel"><p class="eyebrow">Zeitplan</p><h2>Portal-Worker</h2><dl><dt>Status</dt><dd>{{ 'Aktiv' if settings.enabled else 'Pausiert' }}</dd><dt>Intervall</dt><dd>{{ settings.interval_minutes }} Minuten</dd><dt>Nächster Lauf</dt><dd>{{ settings.next_run_at if settings.enabled else '–' }}</dd><dt>Statusdatei</dt><dd>{{ state_updated or 'Noch nicht vorhanden' }}</dd></dl>
-    {% if user.role == 'admin' %}<form method="post" action="/checker/settings" class="checker-settings"><input type="hidden" name="csrf_token" value="{{ csrf }}"><label>Intervall in Minuten<input type="number" name="interval_minutes" min="5" max="1440" value="{{ settings.interval_minutes }}" required></label><label class="inline-check"><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}> Automatische Prüfung aktiv</label><button class="primary">Speichern</button></form>{% endif %}
+    <p class="muted">Mailauslöser: {{ checker_mail_summary }}</p>
   </article>
   <article class="panel"><p class="eyebrow">Manuelle Steuerung</p><h2>Checker ausführen</h2><p class="muted">Es kann immer nur ein Lauf gleichzeitig aktiv sein.</p>
     {% if user.role == 'admin' %}<form method="post" action="/checker/run" class="checker-actions"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="primary" name="mode" value="normal">Jetzt prüfen</button><button class="secondary" name="mode" value="dry_run">Dry-Run</button><button class="secondary" name="mode" value="force">Force-Report</button><button class="secondary" name="mode" value="smtp_check">SMTP prüfen</button><button class="secondary" name="mode" value="smtp_test">Testmail senden</button></form>{% else %}<p class="muted">Manuelle Läufe können nur Administratoren starten.</p>{% endif %}
     <div class="checker-notes"><small><strong>Jetzt prüfen:</strong> aktualisiert Status und darf zustandsabhängige Alarme sowie konfiguriertes Cleanup ausführen.</small><small><strong>Dry-Run:</strong> keine Statusänderung, keine Mail und keine Löschung.</small><small><strong>Force-Report:</strong> vollständige Ergebnismail unabhängig vom Alarmzustand.</small></div>
   </article>
 </section>
+{% if user.role == 'admin' %}
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Automatik und Benachrichtigung</p><h2>Checker-Einstellungen</h2></div><span class="muted">Gilt für jeden Lauf des Portal-Workers</span></div>
+  <form method="post" action="/checker/settings" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="form-grid">
+      <label>Prüfintervall in Minuten<small>Abstand der automatischen Prüfläufe</small><input type="number" name="interval_minutes" min="5" max="1440" value="{{ settings.interval_minutes }}" required></label>
+      <label>Erinnerung alle ... Stunden<small>Abstand, in dem ein weiterhin bestehendes Problem erneut gemeldet wird</small><input type="number" name="reminder_hours" min="1" max="720" value="{{ settings.reminder_hours }}" required></label>
+    </div>
+    <div class="form-block">
+      <div><p class="eyebrow">Benachrichtigungen</p><h2>Mail bei welchen Ergebnissen</h2><p class="muted">Betrifft nur die automatischen und die manuell gestarteten Prüfläufe. Ein Force-Report versendet die Ergebnismail immer, ein Dry-Run niemals.</p></div>
+      <div class="checks">
+        <label><input type="checkbox" name="mail_on_problem" {% if settings.mail_on_problem %}checked{% endif %}> Mail bei Problemen <small>Alarm, sobald eine Prüfung von OK abweicht, danach im Erinnerungsabstand erneut</small></label>
+        <label><input type="checkbox" name="mail_on_recovery" {% if settings.mail_on_recovery %}checked{% endif %}> Mail bei Wiederherstellung <small>Entwarnung, sobald ein zuvor gemeldetes Backup wieder aktuell ist</small></label>
+        <label><input type="checkbox" name="mail_on_clean_run" {% if settings.mail_on_clean_run %}checked{% endif %}> Mail bei fehlerfreiem Lauf <small>Vollständiger Bericht nach jedem Lauf ohne Befund; ohne diese Option bleibt es still</small></label>
+        <label><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}> Automatische Prüfung aktiv <small>Ohne Automatik bleiben nur manuell gestartete Läufe</small></label>
+      </div>
+    </div>
+    <div class="actions"><button class="primary">Checker-Einstellungen speichern</button></div>
+  </form>
+</section>
+{% endif %}
 <section class="panel"><div class="panel-head"><h2>Laufhistorie</h2><span class="muted">Letzte 30 Läufe</span></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Angefordert</th><th>Modus</th><th>Status</th><th>Zeitraum</th><th>Ergebnis</th></tr></thead><tbody>{% for run in runs %}<tr><td><a href="/checker/runs/{{ run.id }}">#{{ run.id }}</a></td><td>{{ run.requested_at }}<small>{{ run.requested_by_name or 'Portal-Zeitplan' }}</small></td><td>{{ {'normal':'Prüfung','force':'Force-Report','dry_run':'Dry-Run','smtp_check':'SMTP-Prüfung','smtp_test':'Testmail'}[run.mode] }}</td><td><span class="status {{ run.status }}">{{ run.status|upper }}</span></td><td>{% if run.started_at and run.finished_at %}{{ run.started_at }} → {{ run.finished_at }}{% elif run.started_at %}Läuft seit {{ run.started_at }}{% else %}–{% endif %}</td><td>{{ run.summary or '–' }}</td></tr>{% else %}<tr><td colspan="6" class="empty">Noch keine portal-gesteuerten Checker-Läufe.</td></tr>{% endfor %}</tbody></table></div></section>
 <section class="panel"><h2>Verwaltete Komponenten</h2><div class="path-list"><code>{{ script_path }}</code><span>Vom Portal ausgeführtes Checker-Script</span><code>{{ config_path }}</code><span>Root-only Checker-Konfiguration</span></div></section>
 {% endblock %}
