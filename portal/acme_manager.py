@@ -10,12 +10,14 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Any
 
 from domain_config import resolve_domain_config
+from runtime_config import runtime_config
 
 try:
     import tomllib
@@ -57,6 +59,33 @@ def file_digest(path: Path) -> str | None:
         return None
 
 
+def promote_pending_domain(config: dict[str, Any]) -> bool:
+    database = config.get("database", {})
+    if not isinstance(database, dict) or not database.get("path"):
+        return False
+    connection = sqlite3.connect(str(database["path"]), timeout=30)
+    try:
+        row = connection.execute(
+            "SELECT pending_domain_tld,pending_domain_subdomain,domain_change_pending "
+            "FROM portal_settings WHERE id=1"
+        ).fetchone()
+        if not row or not row[2]:
+            return False
+        connection.execute(
+            "UPDATE portal_settings SET domain_tld=?,domain_subdomain=?,pending_domain_tld='',"
+            "pending_domain_subdomain='',domain_change_pending=0,updated_at=? WHERE id=1",
+            (row[0], row[1], now_iso()),
+        )
+        connection.execute(
+            "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE active=1",
+            (now_iso(),),
+        )
+        connection.commit()
+        return True
+    finally:
+        connection.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true", help="Zertifikat unabhaengig vom Ablauf neu ausstellen")
@@ -64,6 +93,7 @@ def main() -> int:
 
     with CONFIG_PATH.open("rb") as handle:
         config = tomllib.load(handle)
+    config = runtime_config(config, prefer_pending_domain=True)
     acme = config.get("acme", {})
     if acme.get("mode") not in {"dns-manual", "dns-cloudflare"}:
         raise SystemExit("[acme].mode ist weder dns-manual noch dns-cloudflare")
@@ -115,7 +145,7 @@ def main() -> int:
     auth_command = shlex.join([*hook_base, "auth", *hook_options])
     cleanup_command = shlex.join([*hook_base, "cleanup", *hook_options])
 
-    certificate = Path(str(config["server"]["tls_cert"]))
+    certificate = Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem")
     before = file_digest(certificate)
     command = [
         str(acme.get("certbot", "/usr/bin/certbot")),
@@ -173,9 +203,15 @@ def main() -> int:
             "exit_code": process.returncode,
         }
     )
+    domain_activated = False
+    if process.returncode == 0 and certificate.is_file():
+        domain_activated = promote_pending_domain(config)
+        if domain_activated:
+            job["message"] += "; vorgemerkte Portal-Domain wurde aktiviert"
+            job["domain_activated"] = True
     atomic_json(job_path, job)
 
-    if changed and subprocess.run(
+    if (changed or domain_activated) and subprocess.run(
         ["/usr/bin/systemctl", "is-active", "--quiet", "backup-portal.service"], check=False
     ).returncode == 0:
         subprocess.run(["/usr/bin/systemctl", "try-restart", "backup-portal.service"], check=False)

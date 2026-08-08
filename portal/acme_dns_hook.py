@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from domain_config import resolve_domain_config
+from runtime_config import runtime_config
 
 try:
     import tomllib
@@ -148,6 +149,7 @@ def load_acme_config(path: str) -> dict[str, Any]:
         return {}
     with Path(path).open("rb") as handle:
         config = tomllib.load(handle)
+    config = runtime_config(config, prefer_pending_domain=True)
     acme = config.get("acme", {})
     return acme if isinstance(acme, dict) else {}
 
@@ -223,6 +225,7 @@ def cloudflare_settings(path: str) -> dict[str, Any] | None:
             return settings
         with config_path.open("rb") as handle:
             raw_config = tomllib.load(handle)
+        raw_config = runtime_config(raw_config, prefer_pending_domain=True)
         direct = raw_config.get("cloudflare")
         if isinstance(direct, dict):
             settings = direct

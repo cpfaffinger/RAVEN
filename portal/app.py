@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
+import copy
 import hashlib
 import hmac
 import ipaddress
@@ -37,6 +38,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from domain_config import resolve_domain_config
+from runtime_config import bootstrap_settings, effective_settings, runtime_config
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -45,15 +47,16 @@ with CONFIG_PATH.open("rb") as handle:
     CONFIG = tomllib.load(handle)
 
 DB_PATH = Path(CONFIG["database"]["path"])
+RUNTIME_CONFIG = runtime_config(CONFIG)
 HOME_ROOT = Path(CONFIG["paths"].get("home_root", "/home"))
 CHECKER_STATE = Path(CONFIG["paths"].get("checker_state", "/var/lib/backup-check/state.json"))
 CHECKER_CONFIG_SECTION = CONFIG.get("checker", {})
 CHECKER_SCRIPT = Path(CHECKER_CONFIG_SECTION.get("script", "/opt/backup-portal/checker/backup_check.py"))
 CHECKER_CONFIG_PATH = Path(CHECKER_CONFIG_SECTION.get("config", "/etc/backup-portal/backup-check.toml"))
-DOMAIN_CONFIG = resolve_domain_config(CONFIG)
+DOMAIN_CONFIG = resolve_domain_config(RUNTIME_CONFIG)
 PORTAL_FQDN = str(DOMAIN_CONFIG["fqdn"])
 PUBLIC_BASE_URL = str(DOMAIN_CONFIG["public_base_url"])
-ACME_CONFIG = dict(CONFIG.get("acme", {}))
+ACME_CONFIG = dict(RUNTIME_CONFIG.get("acme", {}))
 ACME_CONFIG["domain"] = PORTAL_FQDN
 ACME_CONFIG["cloudflare"] = dict(ACME_CONFIG.get("cloudflare", {}))
 ACME_CONFIG["cloudflare"]["zone_name"] = str(DOMAIN_CONFIG["tld"])
@@ -279,6 +282,25 @@ def init_db() -> None:
               cloudflare_ttl INTEGER NOT NULL DEFAULT 60,
               updated_by INTEGER REFERENCES users(id), updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS portal_settings (
+              id INTEGER PRIMARY KEY CHECK(id=1),
+              domain_tld TEXT NOT NULL, domain_subdomain TEXT NOT NULL DEFAULT '',
+              pending_domain_tld TEXT NOT NULL DEFAULT '',
+              pending_domain_subdomain TEXT NOT NULL DEFAULT '',
+              domain_change_pending INTEGER NOT NULL DEFAULT 0,
+              username_prefix TEXT NOT NULL, backup_ssh_port INTEGER NOT NULL,
+              remote_hostname TEXT NOT NULL, deployment_token_minutes INTEGER NOT NULL,
+              default_schedule_hour INTEGER NOT NULL, default_schedule_minute INTEGER NOT NULL,
+              min_remote_free_bytes INTEGER NOT NULL,
+              database_split_threshold_bytes INTEGER NOT NULL,
+              updated_by INTEGER REFERENCES users(id), updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS cloudflare_test_runs (
+              id INTEGER PRIMARY KEY,
+              status TEXT NOT NULL CHECK(status IN ('success','failure')),
+              requested_by INTEGER REFERENCES users(id), tested_at TEXT NOT NULL,
+              duration_ms INTEGER NOT NULL, message TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS checker_runs (
               id INTEGER PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('normal','force','dry_run','smtp_check','smtp_test')),
               status TEXT NOT NULL CHECK(status IN ('queued','running','success','problems','error','interrupted')),
@@ -290,8 +312,32 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_commands_client_status ON backup_commands(client_id,status,id);
             CREATE INDEX IF NOT EXISTS idx_run_logs_client_time ON backup_run_logs(client_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_checker_runs_status ON checker_runs(status,id);
+            CREATE INDEX IF NOT EXISTS idx_cloudflare_tests_time ON cloudflare_test_runs(id DESC);
             """
         )
+        portal_defaults = bootstrap_settings(CONFIG)
+        connection.execute(
+            "INSERT OR IGNORE INTO portal_settings("
+            "id,domain_tld,domain_subdomain,username_prefix,backup_ssh_port,remote_hostname,"
+            "deployment_token_minutes,default_schedule_hour,default_schedule_minute,"
+            "min_remote_free_bytes,database_split_threshold_bytes,updated_at) "
+            "VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                portal_defaults["domain_tld"], portal_defaults["domain_subdomain"],
+                portal_defaults["username_prefix"], portal_defaults["backup_ssh_port"],
+                portal_defaults["remote_hostname"], portal_defaults["deployment_token_minutes"],
+                portal_defaults["default_schedule_hour"], portal_defaults["default_schedule_minute"],
+                portal_defaults["min_remote_free_bytes"],
+                portal_defaults["database_split_threshold_bytes"], now_iso(),
+            ),
+        )
+        portal_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_settings)")}
+        if "pending_domain_tld" not in portal_columns:
+            connection.execute("ALTER TABLE portal_settings ADD COLUMN pending_domain_tld TEXT NOT NULL DEFAULT ''")
+        if "pending_domain_subdomain" not in portal_columns:
+            connection.execute("ALTER TABLE portal_settings ADD COLUMN pending_domain_subdomain TEXT NOT NULL DEFAULT ''")
+        if "domain_change_pending" not in portal_columns:
+            connection.execute("ALTER TABLE portal_settings ADD COLUMN domain_change_pending INTEGER NOT NULL DEFAULT 0")
         token_columns = {row[1] for row in connection.execute("PRAGMA table_info(deployment_tokens)")}
         if "token_ciphertext" not in token_columns:
             connection.execute("ALTER TABLE deployment_tokens ADD COLUMN token_ciphertext TEXT")
@@ -511,6 +557,25 @@ def acme_configuration(*, include_token: bool = False) -> dict[str, Any]:
     return result
 
 
+def application_settings(*, prefer_pending_domain: bool = False) -> dict[str, Any]:
+    """Return database-owned settings and the public address derived from them."""
+    values = effective_settings(CONFIG, prefer_pending_domain=prefer_pending_domain)
+    derived_config = copy.deepcopy(CONFIG)
+    derived_config["domain"] = {
+        "tld": values["domain_tld"],
+        "subdomain": values["domain_subdomain"],
+    }
+    resolved = resolve_domain_config(derived_config)
+    values.update(
+        {
+            "fqdn": resolved["fqdn"],
+            "public_base_url": resolved["public_base_url"],
+            "portal_port": resolved["port"],
+        }
+    )
+    return values
+
+
 def normalized_email(value: str) -> str:
     email = value.strip()
     if email and (len(email) > 254 or not EMAIL_RE.fullmatch(email)):
@@ -576,7 +641,7 @@ def audit(request: Request | None, action: str, target: str = "", details: str =
 
 def import_existing_clients() -> int:
     imported = 0
-    prefix = str(CONFIG["onboarding"].get("username_prefix", "backup_"))
+    prefix = str(application_settings()["username_prefix"])
     with db() as connection:
         for home in sorted(HOME_ROOT.glob(prefix + "*")):
             if not home.is_dir():
@@ -1018,15 +1083,16 @@ def login_page(request: Request):
 @app.get("/manual", response_class=HTMLResponse)
 def manual(request: Request):
     require_user(request)
+    settings = application_settings()
     return render(
         request,
         "manual.html",
         {
-            "portal_url": PUBLIC_BASE_URL,
+            "portal_url": settings["public_base_url"],
             "portal_port": int(CONFIG["server"]["port"]),
-            "ssh_host": PORTAL_FQDN,
-            "ssh_port": int(CONFIG["onboarding"]["backup_ssh_port"]),
-            "token_minutes": int(CONFIG["onboarding"].get("deployment_token_minutes", 15)),
+            "ssh_host": settings["fqdn"],
+            "ssh_port": int(settings["backup_ssh_port"]),
+            "token_minutes": int(settings["deployment_token_minutes"]),
             "config_path": str(CONFIG_PATH),
             "database_path": str(DB_PATH),
         },
@@ -1105,6 +1171,100 @@ def smtp_settings_update(
     return RedirectResponse("/settings/smtp?message=SMTP-Konfiguration+gespeichert", status_code=303)
 
 
+@app.get("/settings/application", response_class=HTMLResponse)
+def application_settings_page(request: Request):
+    require_user(request, admin=True)
+    settings = application_settings()
+    configured = application_settings(prefer_pending_domain=True)
+    return render(
+        request,
+        "application_settings.html",
+        {
+            "settings": settings,
+            "configured": configured,
+            "message": request.query_params.get("message", ""),
+            "min_remote_free_gib": round(int(settings["min_remote_free_bytes"]) / 1024**3, 3),
+            "database_split_gib": round(int(settings["database_split_threshold_bytes"]) / 1024**3, 3),
+        },
+    )
+
+
+@app.post("/settings/application")
+def application_settings_update(
+    request: Request,
+    csrf_token: str = Form(...),
+    domain_tld: str = Form(...),
+    domain_subdomain: str = Form(""),
+    username_prefix: str = Form(...),
+    backup_ssh_port: int = Form(...),
+    remote_hostname: str = Form(...),
+    deployment_token_minutes: int = Form(...),
+    default_schedule_hour: int = Form(...),
+    default_schedule_minute: int = Form(...),
+    min_remote_free_gib: float = Form(...),
+    database_split_gib: float = Form(...),
+):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    domain_tld = domain_tld.strip().lower().strip(".")
+    domain_subdomain = domain_subdomain.strip().lower().strip(".")
+    username_prefix = username_prefix.strip()
+    remote_hostname = remote_hostname.strip()
+    candidate = copy.deepcopy(CONFIG)
+    candidate["domain"] = {"tld": domain_tld, "subdomain": domain_subdomain}
+    try:
+        resolved = resolve_domain_config(candidate)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,15}", username_prefix):
+        raise HTTPException(400, "Benutzerpräfix ist ungültig")
+    if not HOST_RE.fullmatch(remote_hostname):
+        raise HTTPException(400, "Remote-Hostname ist ungültig")
+    if not 1 <= backup_ssh_port <= 65535:
+        raise HTTPException(400, "SSH-Port ist ungültig")
+    if not 5 <= deployment_token_minutes <= 1440:
+        raise HTTPException(400, "Deployment-Token-Laufzeit muss zwischen 5 und 1440 Minuten liegen")
+    if not 0 <= default_schedule_hour <= 23 or not 0 <= default_schedule_minute <= 59:
+        raise HTTPException(400, "Standard-Zeitplan ist ungültig")
+    if not 0.25 <= min_remote_free_gib <= 1048576 or not 0.01 <= database_split_gib <= 1048576:
+        raise HTTPException(400, "Größenlimits liegen außerhalb des erlaubten Bereichs")
+    min_remote_free_bytes = int(min_remote_free_gib * 1024**3)
+    database_split_threshold_bytes = int(database_split_gib * 1024**3)
+    with db() as connection:
+        current = connection.execute("SELECT * FROM portal_settings WHERE id=1").fetchone()
+        if not current:
+            raise HTTPException(503, "Portal-Konfiguration ist noch nicht initialisiert")
+        domain_changed = (
+            domain_tld != current["domain_tld"] or domain_subdomain != current["domain_subdomain"]
+        )
+        connection.execute(
+            "UPDATE portal_settings SET pending_domain_tld=?,pending_domain_subdomain=?,"
+            "domain_change_pending=?,username_prefix=?,backup_ssh_port=?,remote_hostname=?,"
+            "deployment_token_minutes=?,default_schedule_hour=?,default_schedule_minute=?,"
+            "min_remote_free_bytes=?,database_split_threshold_bytes=?,updated_by=?,updated_at=? WHERE id=1",
+            (
+                domain_tld if domain_changed else "", domain_subdomain if domain_changed else "",
+                domain_changed, username_prefix, backup_ssh_port, remote_hostname,
+                deployment_token_minutes, default_schedule_hour, default_schedule_minute,
+                min_remote_free_bytes, database_split_threshold_bytes, user["id"], now_iso(),
+            ),
+        )
+        connection.execute(
+            "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE active=1",
+            (now_iso(),),
+        )
+    audit(
+        request, "portal.settings", resolved["fqdn"],
+        f"domain_pending={domain_changed} ssh_port={backup_ssh_port} token_minutes={deployment_token_minutes}",
+        user_id=user["id"],
+    )
+    message = (
+        "Konfiguration gespeichert; Domainwechsel wird nach erfolgreicher Zertifikatsausstellung aktiviert"
+        if domain_changed else "Portal-Konfiguration gespeichert"
+    )
+    return RedirectResponse(f"/settings/application?message={quote(message)}", status_code=303)
+
+
 def read_acme_state(name: str) -> dict[str, Any]:
     if name not in {"challenges.json", "job.json"}:
         return {}
@@ -1119,7 +1279,8 @@ def read_acme_state(name: str) -> dict[str, Any]:
 
 
 def certificate_details() -> dict[str, Any]:
-    certificate_path = Path(str(CONFIG["server"]["tls_cert"]))
+    managed_path = Path(f"/etc/letsencrypt/live/{application_settings()['fqdn']}/fullchain.pem")
+    certificate_path = managed_path if managed_path.is_file() else Path(str(CONFIG["server"]["tls_cert"]))
     result: dict[str, Any] = {"path": str(certificate_path), "available": False}
     try:
         from cryptography import x509
@@ -1164,6 +1325,117 @@ def systemd_active(unit: str) -> bool:
         return False
 
 
+MANAGED_SYSTEMD_UNITS = (
+    "backup-portal.service",
+    "backup-portal-cert-renew.timer",
+    "backup-portal-cert-renew.service",
+)
+
+
+def systemd_unit_details(unit: str) -> dict[str, Any]:
+    if unit not in MANAGED_SYSTEMD_UNITS:
+        raise ValueError("Nicht verwaltete systemd Unit")
+    details = {
+        "name": unit,
+        "kind": "systemd",
+        "status": "unknown",
+        "result": "Nicht verfügbar",
+        "started_at": "",
+        "finished_at": "",
+        "details": "",
+    }
+    try:
+        process = subprocess.run(
+            [
+                "/usr/bin/systemctl", "show", unit, "--no-pager",
+                "--property=ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp,InactiveEnterTimestamp",
+            ],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        values = dict(
+            line.split("=", 1) for line in process.stdout.splitlines() if "=" in line
+        )
+        active = values.get("ActiveState", "unknown")
+        sub = values.get("SubState", "unknown")
+        result = values.get("Result", "") or ("success" if active == "active" else active)
+        details.update(
+            {
+                "status": "success" if active == "active" else "failure" if active == "failed" else "unknown",
+                "result": result,
+                "started_at": values.get("ActiveEnterTimestamp", ""),
+                "finished_at": values.get("InactiveEnterTimestamp", ""),
+                "details": f"{active}/{sub} · Exit {values.get('ExecMainStatus', '–')}",
+            }
+        )
+        if process.returncode != 0:
+            details["details"] = (process.stderr or details["details"])[:500]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        details["details"] = f"{type(exc).__name__}: {exc}"
+    return details
+
+
+@app.get("/processes", response_class=HTMLResponse)
+def processes_page(request: Request):
+    require_user(request, admin=True)
+    managed = [systemd_unit_details(unit) for unit in MANAGED_SYSTEMD_UNITS]
+    managed.extend(
+        [
+            {
+                "name": "Backup-Scheduler", "kind": "Portal-Thread",
+                "status": "success" if SCHEDULER_THREAD and SCHEDULER_THREAD.is_alive() else "failure",
+                "result": "läuft" if SCHEDULER_THREAD and SCHEDULER_THREAD.is_alive() else "gestoppt",
+                "started_at": "Portalstart", "finished_at": "", "details": "Zentrale Backup-Zeitplanung",
+            },
+            {
+                "name": "Checker-Worker", "kind": "Portal-Thread",
+                "status": "success" if CHECKER_THREAD and CHECKER_THREAD.is_alive() else "failure",
+                "result": "läuft" if CHECKER_THREAD and CHECKER_THREAD.is_alive() else "gestoppt",
+                "started_at": "Portalstart", "finished_at": "", "details": "Checker-Warteschlange",
+            },
+        ]
+    )
+    with db() as connection:
+        commands = [dict(row) for row in connection.execute(
+            "SELECT bc.*,c.slug FROM backup_commands bc JOIN clients c ON c.id=bc.client_id "
+            "ORDER BY bc.id DESC LIMIT 50"
+        ).fetchall()]
+        checker_runs = [dict(row) for row in connection.execute(
+            "SELECT cr.*,u.username AS requested_by_name FROM checker_runs cr "
+            "LEFT JOIN users u ON u.id=cr.requested_by ORDER BY cr.id DESC LIMIT 30"
+        ).fetchall()]
+        cloudflare_tests = [dict(row) for row in connection.execute(
+            "SELECT ct.*,u.username AS requested_by_name FROM cloudflare_test_runs ct "
+            "LEFT JOIN users u ON u.id=ct.requested_by ORDER BY ct.id DESC LIMIT 20"
+        ).fetchall()]
+        clients = [dict(row) for row in connection.execute(
+            "SELECT slug,last_poll_at,last_event,last_event_at FROM clients WHERE active=1 ORDER BY slug"
+        ).fetchall()]
+    online = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
+    for client in clients:
+        try:
+            polled = datetime.fromisoformat(str(client["last_poll_at"]).replace("Z", "+00:00"))
+            if polled.tzinfo is None:
+                polled = polled.replace(tzinfo=timezone.utc)
+            online += polled >= cutoff
+        except (TypeError, ValueError):
+            pass
+    return render(
+        request,
+        "processes.html",
+        {
+            "managed": managed,
+            "commands": commands,
+            "checker_runs": checker_runs,
+            "cloudflare_tests": cloudflare_tests,
+            "acme_job": read_acme_state("job.json"),
+            "online_agents": online,
+            "agent_count": len(clients),
+            "generated_at": now_iso(),
+        },
+    )
+
+
 @app.get("/certificates", response_class=HTMLResponse)
 def certificates_page(request: Request):
     require_user(request, admin=True)
@@ -1171,13 +1443,24 @@ def certificates_page(request: Request):
     challenges = list(reversed(challenges_state.get("challenges", [])))
     challenge_running = any(item.get("status") in {"creating_dns", "waiting_dns", "propagated"} for item in challenges)
     cloudflare_settings = acme_configuration()
+    configured_portal = application_settings(prefer_pending_domain=True)
+    acme_display = copy.deepcopy(ACME_CONFIG)
+    acme_display["domain"] = configured_portal["fqdn"]
+    acme_display["cloudflare"] = dict(acme_display.get("cloudflare", {}))
+    acme_display["cloudflare"]["zone_name"] = configured_portal["domain_tld"]
+    with db() as connection:
+        cloudflare_test = connection.execute(
+            "SELECT ct.*,u.username AS requested_by_name FROM cloudflare_test_runs ct "
+            "LEFT JOIN users u ON u.id=ct.requested_by ORDER BY ct.id DESC LIMIT 1"
+        ).fetchone()
     return render(
         request,
         "certificates.html",
         {
             "certificate": certificate_details(),
-            "acme": ACME_CONFIG,
+            "acme": acme_display,
             "cloudflare": cloudflare_settings,
+            "cloudflare_test": dict(cloudflare_test) if cloudflare_test else {},
             "challenges": challenges,
             "job": read_acme_state("job.json"),
             "renewal_running": systemd_active("backup-portal-cert-renew.service"),
@@ -1231,6 +1514,44 @@ def cloudflare_credentials_update(
     audit(request, "cloudflare.credentials", PORTAL_FQDN, f"{action} zone_id={'set' if zone_id else 'auto'} ttl={ttl}", user_id=user["id"])
     message = "Cloudflare-API-Token+entfernt" if remove_token else "Cloudflare-Einstellungen+gespeichert"
     return RedirectResponse(f"/certificates?message={message}", status_code=303)
+
+
+@app.post("/certificates/cloudflare/test")
+def cloudflare_credentials_test(request: Request, csrf_token: str = Form(...)):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    if ACME_CONFIG.get("mode") != "dns-cloudflare":
+        raise HTTPException(400, "Cloudflare-DNS ist nicht aktiviert")
+    if not acme_configuration().get("token_configured"):
+        raise HTTPException(409, "Cloudflare API-Token ist nicht konfiguriert")
+    started = time.monotonic()
+    hook = Path(str(ACME_CONFIG.get("hook", BASE_DIR / "acme_dns_hook.py")))
+    command = [sys.executable, str(hook), "cloudflare-check", "--config", str(CONFIG_PATH)]
+    try:
+        process = subprocess.run(
+            command, capture_output=True, text=True, errors="replace", timeout=45, check=False,
+        )
+        output = (process.stdout + ("\n" if process.stdout and process.stderr else "") + process.stderr).strip()
+        message = output[-1000:] or f"Cloudflare-Test endete mit Status {process.returncode}"
+        status = "success" if process.returncode == 0 else "failure"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        status = "failure"
+        message = f"{type(exc).__name__}: {exc}"
+    duration_ms = int((time.monotonic() - started) * 1000)
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO cloudflare_test_runs(status,requested_by,tested_at,duration_ms,message) VALUES(?,?,?,?,?)",
+            (status, user["id"], now_iso(), duration_ms, message),
+        )
+        connection.execute(
+            "DELETE FROM cloudflare_test_runs WHERE id IN "
+            "(SELECT id FROM cloudflare_test_runs ORDER BY id DESC LIMIT -1 OFFSET 100)"
+        )
+    audit(request, "cloudflare.test", application_settings(prefer_pending_domain=True)["fqdn"], status, user_id=user["id"])
+    return RedirectResponse(
+        f"/certificates?message={quote('Cloudflare-Test erfolgreich' if status == 'success' else 'Cloudflare-Test fehlgeschlagen')}",
+        status_code=303,
+    )
 
 
 @app.post("/certificates/request")
@@ -2112,7 +2433,7 @@ def client_new_page(request: Request):
     return render(
         request,
         "client_new.html",
-        {"error": "", "defaults": CONFIG["onboarding"], "policies": active_policies()},
+        {"error": "", "defaults": application_settings(), "policies": active_policies()},
     )
 
 
@@ -2157,12 +2478,13 @@ def client_create(
 ):
     user = require_user(request, admin=True)
     verify_csrf(user, csrf_token)
+    settings = application_settings()
     slug = slug.strip().lower()
     source_hostname = source_hostname.strip()
     if not USERNAME_RE.fullmatch(slug):
-        return render(request, "client_new.html", {"error": "Slug muss 2–24 sichere Kleinbuchstaben/Ziffern enthalten.", "defaults": CONFIG["onboarding"], "policies": active_policies()}, 400)
+        return render(request, "client_new.html", {"error": "Slug muss 2–24 sichere Kleinbuchstaben/Ziffern enthalten.", "defaults": settings, "policies": active_policies()}, 400)
     if source_hostname and not HOST_RE.fullmatch(source_hostname):
-        return render(request, "client_new.html", {"error": "Quellhostname ist ungueltig.", "defaults": CONFIG["onboarding"], "policies": active_policies()}, 400)
+        return render(request, "client_new.html", {"error": "Quellhostname ist ungueltig.", "defaults": settings, "policies": active_policies()}, 400)
     if not (0 <= schedule_hour <= 23 and 0 <= schedule_minute <= 59):
         raise HTTPException(400, "Ungueltige Uhrzeit")
     agent_log_level = agent_log_level.upper().strip()
@@ -2170,7 +2492,7 @@ def client_create(
         raise HTTPException(400, "Ungueltiger Agent-Loglevel")
     if not 16 <= agent_log_max_kb <= 512:
         raise HTTPException(400, "Agent-Portallog muss zwischen 16 und 512 KB liegen")
-    prefix = str(CONFIG["onboarding"].get("username_prefix", "backup_"))
+    prefix = str(settings["username_prefix"])
     username = prefix + slug
     if len(username) > 31:
         raise HTTPException(400, "Systembenutzername ist zu lang")
@@ -2390,7 +2712,7 @@ def trigger_backup(request: Request, client_id: int, csrf_token: str = Form(...)
 
 
 def build_deployment_command(raw: str) -> str:
-    base = PUBLIC_BASE_URL.rstrip("/")
+    base = str(application_settings()["public_base_url"]).rstrip("/")
     return (
         f"curl -fsS --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 "
         f"'{base}/bootstrap' -H 'Authorization: Bearer {raw}' | python3"
@@ -2407,7 +2729,7 @@ def create_deployment_token(
     user = require_user(request, admin=True)
     verify_csrf(user, csrf_token)
     raw = secrets.token_urlsafe(32)
-    minutes = int(CONFIG["onboarding"].get("deployment_token_minutes", 15))
+    minutes = int(application_settings()["deployment_token_minutes"])
     with db() as connection:
         client = connection.execute("SELECT * FROM clients WHERE id=? AND active=1", (client_id,)).fetchone()
         if not client:
@@ -2464,7 +2786,7 @@ def deployment_command_page(request: Request, client_id: int):
         {
             "client": dict(client),
             "command": command,
-            "minutes": int(CONFIG["onboarding"].get("deployment_token_minutes", 15)),
+            "minutes": int(application_settings()["deployment_token_minutes"]),
             "expires_at": expires_at,
             "start_immediately": bool(client["run_initial_backup"]),
         },
@@ -2514,7 +2836,7 @@ def bootstrap(request: Request):
     _, client = deployment_for_token(raw)
     source = Path(CONFIG["paths"]["bootstrap_script"]).read_text(encoding="utf-8")
     prefix = (
-        f"PORTAL_URL = {PUBLIC_BASE_URL.rstrip('/')!r}\n"
+        f"PORTAL_URL = {str(application_settings()['public_base_url']).rstrip('/')!r}\n"
         f"DEPLOYMENT_TOKEN = {raw!r}\nCLIENT_SLUG = {client['slug']!r}\n"
     )
     return PlainTextResponse(prefix + source, headers={"Content-Disposition": "inline", "X-Content-Type-Options": "nosniff"})
@@ -2535,7 +2857,7 @@ def validate_public_key(value: str) -> str:
 
 
 def build_agent_config(client: sqlite3.Row, source_hostname: str, has_mariadb: bool, agent_token: str) -> str:
-    onboarding = CONFIG["onboarding"]
+    onboarding = application_settings()
     smtp = smtp_configuration()
     alias = f"raven-backup-{client['slug']}"
     with db() as connection:
@@ -2549,12 +2871,12 @@ def build_agent_config(client: sqlite3.Row, source_hostname: str, has_mariadb: b
     )
     empty_sources_config = "sources = []\n" if not policy["paths"] else ""
     to_addresses = json.dumps(list(smtp["to"]))
-    portal_url = PUBLIC_BASE_URL.rstrip('/')
+    portal_url = str(onboarding["public_base_url"]).rstrip('/')
     mariadb_databases = has_mariadb and policy["mariadb_databases_enabled"]
     mariadb_users = has_mariadb and policy["mariadb_users_enabled"]
     mail_on_success = bool(client["mail_on_success"]) and bool(smtp["enabled"])
     mail_on_failure = bool(client["mail_on_failure"]) and bool(smtp["enabled"])
-    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{PORTAL_FQDN}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\n{empty_sources_config}\n{path_config}\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = "{smtp['username']}"\npassword = "{smtp['password']}"\nfrom_address = "{smtp['from_address']}"\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
+    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{onboarding['fqdn']}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\n{empty_sources_config}\n{path_config}\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = "{smtp['username']}"\npassword = "{smtp['password']}"\nfrom_address = "{smtp['from_address']}"\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
 
 
 @app.post("/api/onboard/register")
@@ -2570,6 +2892,7 @@ async def onboard_register(request: Request):
     if not HOST_RE.fullmatch(source_hostname):
         raise HTTPException(400, "Invalid source hostname")
     has_mariadb = bool(payload.get("has_mariadb", False))
+    settings = application_settings()
     account = pwd.getpwnam(client["username"])
     home = Path(account.pw_dir)
     ssh_dir = home / ".ssh"
@@ -2591,9 +2914,9 @@ async def onboard_register(request: Request):
         )
         connection.execute("UPDATE deployment_tokens SET used_at=? WHERE token_hash=?", (now_iso(), token["token_hash"]))
     host_key = Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text(encoding="utf-8").split()
-    known_hosts_line = f"[{PORTAL_FQDN}]:{int(CONFIG['onboarding']['backup_ssh_port'])} {host_key[0]} {host_key[1]}"
+    known_hosts_line = f"[{settings['fqdn']}]:{int(settings['backup_ssh_port'])} {host_key[0]} {host_key[1]}"
     alias = f"raven-backup-{client['slug']}"
-    ssh_config = f"Host {alias}\n    HostName {PORTAL_FQDN}\n    Port {int(CONFIG['onboarding']['backup_ssh_port'])}\n    User {client['username']}\n    IdentityFile /root/.ssh/raven_backup_{client['slug']}\n    IdentitiesOnly yes\n    Compression yes\n    BatchMode yes\n    StrictHostKeyChecking yes\n"
+    ssh_config = f"Host {alias}\n    HostName {settings['fqdn']}\n    Port {int(settings['backup_ssh_port'])}\n    User {client['username']}\n    IdentityFile /root/.ssh/raven_backup_{client['slug']}\n    IdentitiesOnly yes\n    Compression yes\n    BatchMode yes\n    StrictHostKeyChecking yes\n"
     backup_script = Path(CONFIG["paths"]["backup_script"]).read_bytes()
     backup_config = build_agent_config(client, source_hostname, has_mariadb, agent_token).encode("utf-8")
     cron_line = "* * * * * /usr/bin/python3 -u /root/backup --config /root/backup-job.toml --poll >> /var/log/raven-backup.log 2>&1"

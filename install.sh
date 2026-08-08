@@ -123,6 +123,7 @@ require_project_files() {
         "portal/acme_dns_hook.py"
         "portal/acme_manager.py"
         "portal/domain_config.py"
+        "portal/runtime_config.py"
         "portal/backup-portal-cert-renew.service"
         "portal/backup-portal-cert-renew.timer"
         "portal/README.md"
@@ -700,6 +701,7 @@ ttl = ${CLOUDFLARE_TTL}
 EOF
         install -d -o root -g root -m 0755 "$APP_DIR"
         install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/domain_config.py" "$APP_DIR/domain_config.py"
+        install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/runtime_config.py" "$APP_DIR/runtime_config.py"
         install -o root -g root -m 0755 "${PROJECT_ROOT}/portal/acme_dns_hook.py" "$APP_DIR/acme_dns_hook.py"
         /usr/bin/python3 "$APP_DIR/acme_dns_hook.py" cloudflare-check --config "${TEMP_DIR}/cloudflare-check.toml"
         install -o root -g root -m 0600 "${TEMP_DIR}/cloudflare-acme.toml" "$CLOUDFLARE_CREDENTIALS_FILE"
@@ -708,6 +710,7 @@ EOF
         install -d -o root -g root -m 0755 "$APP_DIR"
         install -d -o root -g root -m 0700 "$ACME_STATE_DIR"
         install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/domain_config.py" "$APP_DIR/domain_config.py"
+        install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/runtime_config.py" "$APP_DIR/runtime_config.py"
         install -o root -g root -m 0755 "${PROJECT_ROOT}/portal/acme_dns_hook.py" "$APP_DIR/acme_dns_hook.py"
         install -o root -g root -m 0755 "${PROJECT_ROOT}/portal/acme_manager.py" "$APP_DIR/acme_manager.py"
         if [[ ! -r "$TLS_CERT_PATH" || ! -r "$TLS_KEY_PATH" ]] || yes_value "$ACME_FORCE_REISSUE"; then
@@ -907,6 +910,7 @@ install_application() {
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/requirements.txt" "$APP_DIR/requirements.txt"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/README.md" "$APP_DIR/README.md"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/domain_config.py" "$APP_DIR/domain_config.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/runtime_config.py" "$APP_DIR/runtime_config.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/assets/bootstrap_agent.py" "$APP_DIR/assets/bootstrap_agent.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/backupscript/backup_job.py" "$APP_DIR/assets/backup_job.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/backup_check.py" "$APP_DIR/checker/backup_check.py"
