@@ -2671,8 +2671,9 @@ def policy_detail(request: Request, policy_id: int):
         clients = connection.execute(
             "SELECT id,slug,source_hostname FROM clients WHERE policy_id=? ORDER BY slug", (policy_id,)
         ).fetchall()
-    if not policy:
-        raise HTTPException(404)
+        if not policy:
+            raise HTTPException(404)
+        copy_name = suggested_copy_name(connection, str(policy["name"]))
     now = datetime.now().astimezone()
     _current, following = backup_schedule.schedule_window(
         now, policy["schedule_hour"], policy["schedule_minute"], policy["interval_hours"]
@@ -2689,6 +2690,8 @@ def policy_detail(request: Request, policy_id: int):
                 policy["schedule_hour"], policy["schedule_minute"], policy["interval_hours"]
             ),
             "next_slot": following,
+            "copy_name": copy_name,
+            "message": request.query_params.get("message", ""),
         },
     )
 
@@ -2740,6 +2743,65 @@ def policy_update(
         raise HTTPException(409, "Policy-Name existiert bereits")
     audit(request, "policy.update", name, f"policy_id={policy_id}", user_id=user["id"])
     return RedirectResponse(f"/policies/{policy_id}", status_code=303)
+
+
+POLICY_NAME_MAX = 80
+
+
+def policy_name_with_suffix(name: str, suffix: str) -> str:
+    """Append a suffix and keep the result inside the allowed name length."""
+    return f"{name[:POLICY_NAME_MAX - len(suffix)].rstrip()}{suffix}"
+
+
+def suggested_copy_name(connection: sqlite3.Connection, name: str) -> str:
+    """Return an unused name for a copy of the given policy."""
+    candidate = policy_name_with_suffix(name, " (Kopie)")
+    counter = 2
+    while connection.execute("SELECT 1 FROM backup_policies WHERE name=?", (candidate,)).fetchone():
+        candidate = policy_name_with_suffix(name, f" (Kopie {counter})")
+        counter += 1
+        if counter > 99:
+            raise HTTPException(409, "Es existieren bereits zu viele Kopien dieser Policy")
+    return candidate
+
+
+@app.post("/policies/{policy_id}/duplicate")
+def policy_duplicate(
+    request: Request, policy_id: int, name: str = Form(""), csrf_token: str = Form(...)
+):
+    """Copy a policy including its path rules, but without its server assignments."""
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    try:
+        with db() as connection:
+            source = connection.execute(
+                "SELECT * FROM backup_policies WHERE id=?", (policy_id,)
+            ).fetchone()
+            if not source:
+                raise HTTPException(404)
+            new_name = name.strip() or suggested_copy_name(connection, str(source["name"]))
+            if not (3 <= len(new_name) <= POLICY_NAME_MAX):
+                raise HTTPException(400, f"Policy-Name muss 3 bis {POLICY_NAME_MAX} Zeichen lang sein")
+            cursor = connection.execute(
+                "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
+                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,mail_on_success,"
+                "mail_on_failure,mail_on_skipped,active,created_at,updated_at) "
+                "SELECT ?,description,mariadb_enabled,mariadb_databases_enabled,mariadb_users_enabled,"
+                "schedule_hour,schedule_minute,interval_hours,mail_on_success,mail_on_failure,"
+                "mail_on_skipped,active,?,? FROM backup_policies WHERE id=?",
+                (new_name, now_iso(), now_iso(), policy_id),
+            )
+            new_id = int(cursor.lastrowid)
+            connection.execute(
+                "INSERT INTO policy_paths(policy_id,source_path,target_name,mode,sort_order) "
+                "SELECT ?,source_path,target_name,mode,sort_order FROM policy_paths WHERE policy_id=?",
+                (new_id, policy_id),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "Policy-Name existiert bereits") from exc
+    audit(request, "policy.duplicate", new_name, f"source_policy_id={policy_id}", user_id=user["id"])
+    message = f"Kopie von „{source['name']}“ angelegt; noch keinem Server zugewiesen"
+    return RedirectResponse(f"/policies/{new_id}?message={quote(message)}", status_code=303)
 
 
 @app.post("/policies/{policy_id}/delete")

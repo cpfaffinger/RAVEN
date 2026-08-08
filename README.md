@@ -22,7 +22,7 @@ Dieses Repository enthält drei zusammengehörige Komponenten:
 - `backup_check.py`: zentraler, zustandsbehafteter Backup- und Speicherplatz-Checker.
 - `portal/`: öffentlich erreichbares, TLS-geschütztes Onboarding- und Statusportal.
 
-Das Portal modelliert wiederverwendbare Backup-Policies. Jeder Server besitzt genau eine Policy; jeder konfigurierte Pfad wird entweder als aktuelle `sync`-Kopie oder als direkt gestreamtes `tar.zst` gesichert. Alle persistenten MariaDB- und Dateisystem-Sicherungen sind Zstandard-komprimiert. Jeder Queue-Auftrag enthält einen unveränderlichen Policy-Snapshot, damit spätere Änderungen laufende oder bereits wartende Backups nicht beeinflussen. Nicht mehr zugewiesene Policies können Administratoren in der Detailansicht sicher löschen; historische Auftragssnapshots bleiben erhalten.
+Das Portal modelliert wiederverwendbare Backup-Policies. Jeder Server besitzt genau eine Policy; jeder konfigurierte Pfad wird entweder als aktuelle `sync`-Kopie oder als direkt gestreamtes `tar.zst` gesichert. Alle persistenten MariaDB- und Dateisystem-Sicherungen sind Zstandard-komprimiert. Jeder Queue-Auftrag enthält einen unveränderlichen Policy-Snapshot, damit spätere Änderungen laufende oder bereits wartende Backups nicht beeinflussen. Eine bestehende Policy lässt sich in der Detailansicht als Vorlage duplizieren – die Kopie übernimmt Zeitplan, Mailereignisse, MariaDB-Optionen und alle Pfadregeln, bleibt aber zunächst ohne Serverzuweisung. Nicht mehr zugewiesene Policies können Administratoren dort ebenso sicher löschen; historische Auftragssnapshots bleiben erhalten.
 
 Produktionspfade:
 
