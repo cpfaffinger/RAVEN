@@ -62,7 +62,7 @@ Der Zielserver benötigt:
 - bei `letsencrypt-dns-cloudflare` ein auf die betreffende Zone begrenztes Cloudflare-API-Token mit `Zone DNS Edit`; für automatische Zone-Erkennung zusätzlich `Zone Read`
 - beim manuellen Fallback `letsencrypt-dns-manual` Schreibzugriff auf die DNS-Zone für den jeweils angezeigten TXT-Eintrag; Port 80 und ein lokaler Webserver sind in beiden DNS-Modi nicht erforderlich
 - nur beim alternativen `letsencrypt-http` zusätzlich TCP-Port `80` für HTTP-01-Ausstellung und Erneuerung
-- SMTP-Zugangsdaten und mindestens einen Warnempfänger
+- SMTP-Zugangsdaten und eine E-Mail-Adresse für den initialen Administrator
 
 Der Installer ergänzt den konfigurierten SSH-Port, entfernt aber keine bestehenden SSH-Ports. Ist UFW bereits aktiv, werden die benötigten Regeln idempotent ergänzt. Eine inaktive Firewall wird bewusst nicht automatisch aktiviert, damit kein bestehender Remote-Zugang ausgesperrt wird. Bei einer vorgelagerten Cloud-Firewall oder Security Group müssen dieselben Ports dort separat erlaubt werden.
 
@@ -95,7 +95,7 @@ Der Assistent installiert und validiert zuerst sämtliche System- und Python-Abh
 | Backup-SSH-Port | SSH-Zielport der Backup-Agenten | `49150` |
 | Zielhostname | Erwartete Ausgabe von `hostname` auf dem Backupserver | automatisch erkannt |
 | Admin-Benutzer und Passwort | Erstes lokales Portal-Administratorkonto | `admin`, Passwort mindestens 12 Zeichen |
-| SMTP | Host, Port, Benutzer, Passwort, Absender und Empfänger; Transport ist fest Plain-SMTP | vorhandene Werte bzw. Vorbelegung |
+| SMTP | Host, Port, Benutzer, Passwort und Absender; die initiale Admin-E-Mail wird als erster Empfänger aktiviert, Transport ist fest Plain-SMTP | vorhandene Werte bzw. Vorbelegung |
 | Checker-Intervall | Abstand zentraler Backupprüfungen | `60` Minuten |
 | Freispeichergrenze | Alarm, wenn der freie Anteil darunter fällt | `15` Prozent |
 | Aufbewahrung | Alter persistenter Backup-Snapshots bis zur Rotation | `7` Tage |
@@ -105,7 +105,7 @@ Der Assistent installiert und validiert zuerst sämtliche System- und Python-Abh
 
 Das Admin-Passwort wird verdeckt abgefragt. Das SMTP-Passwort kann bei einer erneuten Installation durch eine leere Eingabe unverändert übernommen werden.
 
-SMTP wird bei der Initialisierung in die eingebettete SQLite-Datenbank übernommen und danach im Webinterface zentral verwaltet; das Passwort ist mit dem Portal-Master-Secret verschlüsselt. Checker und Backup-Agent verwenden bewusst ausschließlich Plain-SMTP ohne STARTTLS oder SMTPS.
+SMTP wird bei der Initialisierung in die eingebettete SQLite-Datenbank übernommen und danach im Webinterface zentral verwaltet; das Passwort ist mit dem Portal-Master-Secret verschlüsselt. Empfänger werden ausschließlich unter **Benutzer** über E-Mail-Adresse und **Mails erhalten** gesteuert. Nur aktive, freigeschaltete Benutzer erhalten Berichte. Checker laden die Liste bei jedem Lauf; Agenten übernehmen Änderungen beim nächsten Poll als atomare Konfigurationsaktualisierung. Beide Versandwege verwenden bewusst ausschließlich Plain-SMTP ohne STARTTLS oder SMTPS.
 
 `[domain].tld` und `[domain].subdomain` sind die einzige Hostnamen-Konfiguration. Der resultierende FQDN wird zentral für öffentliche Portal- und Curl-Links, Agent-Endpunkte, SSH-Onboarding, Trusted Hosts, Let’s Encrypt und die Cloudflare-Zone verwendet. Der HTTPS-Port wird aus `[server].port` ergänzt. Im interaktiven Assistenten entfernt `-` eine vorhandene Subdomain; non-interaktiv bewirkt `DOMAIN_SUBDOMAIN=-` dasselbe.
 

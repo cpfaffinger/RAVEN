@@ -248,9 +248,23 @@ try:
     connection.row_factory = sqlite3.Row
     try:
         if section == "smtp":
+            if key == "to":
+                try:
+                    recipient = connection.execute(
+                        "SELECT email FROM users WHERE active=1 AND receive_notifications=1 "
+                        "AND TRIM(email)<>'' ORDER BY (role='admin') DESC,id LIMIT 1"
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    legacy = connection.execute(
+                        "SELECT recipients_json FROM smtp_settings WHERE id=1"
+                    ).fetchone()
+                    legacy_values = json.loads(legacy["recipients_json"] or "[]") if legacy else []
+                    recipient = {"email": str(legacy_values[0]).strip()} if legacy_values else None
+                print(recipient["email"] if recipient else fallback)
+                raise SystemExit(0)
             row = connection.execute("SELECT * FROM smtp_settings WHERE id=1").fetchone()
             column = {"host": "host", "port": "port", "username": "username", "password": "password_ciphertext",
-                      "from_address": "from_address", "to": "recipients_json"}[key]
+                      "from_address": "from_address"}[key]
         elif section == "cloudflare":
             row = connection.execute("SELECT * FROM acme_settings WHERE id=1").fetchone()
             column = {"api_token": "cloudflare_token_ciphertext", "zone_id": "cloudflare_zone_id",
@@ -267,8 +281,6 @@ try:
         secret = str(config["security"]["session_secret"])
         cipher_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
         value = Fernet(cipher_key).decrypt(str(value).encode("ascii")).decode("utf-8")
-    elif key == "to":
-        value = ",".join(str(item) for item in json.loads(value))
     print(value if value is not None else fallback)
 except Exception:
     print(fallback)
@@ -403,18 +415,9 @@ validate_configuration() {
     [[ "$ADMIN_USERNAME" =~ ^[A-Za-z][A-Za-z0-9_.-]{2,31}$ ]] || die "Ungueltiger Admin-Benutzername."
     [[ ${#ADMIN_PASSWORD} -ge 12 ]] || die "Das Admin-Passwort muss mindestens 12 Zeichen lang sein."
     valid_port "$SMTP_PORT" || die "Ungueltiger SMTP-Port."
-    [[ -n "$SMTP_HOST" && -n "$SMTP_FROM" && -n "$SMTP_TO" ]] || die "SMTP-Host, Absender und Empfaenger sind erforderlich."
-    local email email_count=0 old_ifs=$IFS
-    local -a recipient_items=()
-    IFS=',' read -r -a recipient_items <<<"$SMTP_TO"
-    IFS=$old_ifs
-    for email in "${recipient_items[@]}"; do
-        email="${email#"${email%%[![:space:]]*}"}"
-        email="${email%"${email##*[![:space:]]}"}"
-        [[ "$email" == *@*.* ]] || die "Ungueltiger SMTP-Empfaenger: ${email:-leer}"
-        ((email_count += 1))
-    done
-    ((email_count > 0)) || die "Mindestens ein SMTP-Empfaenger ist erforderlich."
+    [[ -n "$SMTP_HOST" && -n "$SMTP_FROM" && -n "$SMTP_TO" ]] || die "SMTP-Host, Absender und Admin-E-Mail sind erforderlich."
+    [[ "$SMTP_TO" != *,* && "$SMTP_TO" != *\;* && "$SMTP_TO" == *@*.* ]] \
+        || die "SMTP_TO muss genau eine gueltige E-Mail-Adresse fuer den initialen Admin enthalten."
     if [[ -n "$SMTP_USERNAME" && -z "$SMTP_PASSWORD" ]]; then
         die "Bei gesetztem SMTP-Benutzernamen darf das SMTP-Passwort nicht leer sein."
     fi
@@ -545,7 +548,7 @@ PY
     else
         TLS_MODE=${TLS_MODE:-letsencrypt-dns-cloudflare}
     fi
-    ACME_EMAIL=${ACME_EMAIL:-${SMTP_TO%%,*}}
+    ACME_EMAIL=${ACME_EMAIL:-$SMTP_TO}
     ACME_DNS_RESOLVERS=${ACME_DNS_RESOLVERS:-$(config_value "$CONFIG_FILE" acme resolvers "1.1.1.1,8.8.8.8")}
     ACME_DNS_TIMEOUT_SECONDS=${ACME_DNS_TIMEOUT_SECONDS:-$(config_value "$CONFIG_FILE" acme propagation_timeout_seconds "7200")}
     ACME_DNS_POLL_SECONDS=${ACME_DNS_POLL_SECONDS:-$(config_value "$CONFIG_FILE" acme poll_interval_seconds "15")}
@@ -577,7 +580,7 @@ PY
     ask SMTP_USERNAME "SMTP-Benutzer (leer fuer anonymes SMTP)"
     read_smtp_password "$existing_smtp_password"
     ask SMTP_FROM "Mail-Absender"
-    ask SMTP_TO "Warnempfaenger, kommasepariert"
+    ask SMTP_TO "E-Mail-Adresse des initialen Admins"
     ask CHECKER_INTERVAL_MINUTES "Checker-Intervall in Minuten"
     ask MINIMUM_FREE_PERCENT "Alarmgrenze freier Zielspeicher in Prozent"
     ask SNAPSHOT_RETENTION_DAYS "Aufbewahrung persistenter Backups in Tagen"
@@ -586,7 +589,7 @@ PY
     ask TLS_MODE "TLS-Modus (letsencrypt-dns-cloudflare, letsencrypt-dns-manual, letsencrypt-http oder existing)"
 
     if [[ ${TLS_MODE,,} == letsencrypt-* ]]; then
-        ACME_EMAIL=${ACME_EMAIL:-${SMTP_TO%%,*}}
+        ACME_EMAIL=${ACME_EMAIL:-$SMTP_TO}
         ACME_EMAIL="${ACME_EMAIL#"${ACME_EMAIL%%[![:space:]]*}"}"
         ACME_EMAIL="${ACME_EMAIL%"${ACME_EMAIL##*[![:space:]]}"}"
         ask ACME_EMAIL "Let's-Encrypt-Kontaktadresse"
@@ -1003,28 +1006,29 @@ with app.db() as connection:
     smtp_ciphertext = current_smtp["password_ciphertext"] if current_smtp else ""
     if smtp_password:
         smtp_ciphertext = app.encrypt_deployment_token(smtp_password)
-    recipients = [item.strip() for item in smtp_to.replace(";", ",").split(",") if item.strip()]
+    admin_email = smtp_to.strip()
     connection.execute(
         "INSERT INTO smtp_settings(id,enabled,host,port,username,password_ciphertext,from_address,"
         "recipients_json,timeout_seconds,updated_at) VALUES(1,1,?,?,?,?,?,?,20,?) "
         "ON CONFLICT(id) DO UPDATE SET enabled=1,host=excluded.host,port=excluded.port,"
         "username=excluded.username,password_ciphertext=excluded.password_ciphertext,"
         "from_address=excluded.from_address,recipients_json=excluded.recipients_json,updated_at=excluded.updated_at",
-        (smtp_host, int(smtp_port), smtp_username, smtp_ciphertext, smtp_from, json.dumps(recipients), app.now_iso()),
+        (smtp_host, int(smtp_port), smtp_username, smtp_ciphertext, smtp_from, "[]", app.now_iso()),
     )
     existing = connection.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
     encoded = app.hash_password(password)
     if existing:
         connection.execute(
-            "UPDATE users SET password_hash=?,role='admin',active=1 WHERE id=?",
-            (encoded, existing["id"]),
+            "UPDATE users SET password_hash=?,role='admin',email=?,receive_notifications=1,active=1 WHERE id=?",
+            (encoded, admin_email, existing["id"]),
         )
         connection.execute("DELETE FROM sessions WHERE user_id=?", (existing["id"],))
         action = "installer.admin_update"
     else:
         connection.execute(
-            "INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)",
-            (username, "Administrator", encoded, "admin", app.now_iso()),
+            "INSERT INTO users(username,display_name,password_hash,role,email,receive_notifications,created_at) "
+            "VALUES(?,?,?,?,?,1,?)",
+            (username, "Administrator", encoded, "admin", admin_email, app.now_iso()),
         )
         action = "installer.admin_create"
     connection.execute(

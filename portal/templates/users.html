@@ -1,7 +1,33 @@
 {% extends "base.html" %}
 {% block title %}Benutzer · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Zugriffskontrolle</p><h1>Lokale Benutzer</h1><p class="muted">Administratoren verwalten Server und Benutzer; Viewer besitzen ausschließlich Lesezugriff.</p></div></div>
-<section class="detail-grid users-grid"><form method="post" action="/users" class="panel stack"><h2>Benutzer anlegen</h2><input type="hidden" name="csrf_token" value="{{ csrf }}"><label>Benutzername<input name="username" required></label><label>Anzeigename<input name="display_name" required></label><label>Passwort<input type="password" name="password" minlength="12" required></label><label>Rolle<select name="role"><option value="viewer">Viewer</option><option value="admin">Administrator</option></select></label><button class="primary">Anlegen</button></form>
-<section class="panel"><h2>Vorhandene Benutzer</h2>{% for item in users %}<article class="user-row"><div><strong>{{ item.display_name }}</strong><small>{{ item.username }} · {{ item.role }} · {{ 'aktiv' if item.active else 'deaktiviert' }}</small></div><div class="user-actions"><form method="post" action="/users/{{ item.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary">{{ 'Deaktivieren' if item.active else 'Aktivieren' }}</button></form><form method="post" action="/users/{{ item.id }}/password" class="password-form"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="password" name="password" minlength="12" placeholder="Neues Passwort" required><button class="secondary">Setzen</button></form></div></article>{% endfor %}</section></section>
+<div class="page-head"><div><p class="eyebrow">Zugriffskontrolle</p><h1>Lokale Benutzer</h1><p class="muted">Portal-Zugriff und Mailbenachrichtigungen werden pro Benutzer verwaltet. Nur aktive Benutzer mit aktivierter Mailoption erhalten Berichte.</p></div></div>
+{% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
+<section class="detail-grid users-grid">
+  <form method="post" action="/users" class="panel stack">
+    <h2>Benutzer anlegen</h2><input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Benutzername<input name="username" required></label>
+    <label>Anzeigename<input name="display_name" required></label>
+    <label>E-Mail-Adresse<input type="email" name="email" placeholder="name@example.com"></label>
+    <label>Passwort<input type="password" name="password" minlength="12" required></label>
+    <label>Rolle<select name="role"><option value="viewer">Viewer</option><option value="admin">Administrator</option></select></label>
+    <div class="checks notification-check"><label><input type="checkbox" name="receive_notifications"> Backup- und Checker-Mails erhalten</label></div>
+    <button class="primary">Anlegen</button>
+  </form>
+  <section class="panel"><h2>Vorhandene Benutzer</h2>
+    {% for item in users %}<article class="user-row">
+      <div><strong>{{ item.display_name }}</strong><small>{{ item.username }} · {{ item.role }} · {{ 'aktiv' if item.active else 'deaktiviert' }}</small></div>
+      <form method="post" action="/users/{{ item.id }}/notifications" class="notification-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <label>E-Mail<input type="email" name="email" value="{{ item.email }}" placeholder="name@example.com"></label>
+        <label class="notification-toggle"><input type="checkbox" name="receive_notifications" {% if item.receive_notifications %}checked{% endif %}> Mails erhalten</label>
+        <button class="secondary">Speichern</button>
+      </form>
+      <div class="user-actions">
+        <form method="post" action="/users/{{ item.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary">{{ 'Deaktivieren' if item.active else 'Aktivieren' }}</button></form>
+        <form method="post" action="/users/{{ item.id }}/password" class="password-form"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="password" name="password" minlength="12" placeholder="Neues Passwort" required><button class="secondary">Setzen</button></form>
+      </div>
+    </article>{% endfor %}
+  </section>
+</section>
 {% endblock %}

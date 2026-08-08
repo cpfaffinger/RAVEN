@@ -63,6 +63,7 @@ LEGACY_CLOUDFLARE_CREDENTIALS_PATH = Path(
 )
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
 PORTAL_USER_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.-]{2,31}$")
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}[A-Za-z0-9]$")
 PUBLIC_KEY_RE = re.compile(r"^ssh-ed25519 ([A-Za-z0-9+/]+={0,3})(?:\s+.*)?$")
 POLICY_TARGET_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -181,6 +182,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
               id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL,
               password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','viewer')),
+              email TEXT NOT NULL DEFAULT '', receive_notifications INTEGER NOT NULL DEFAULT 0,
               active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -201,6 +203,7 @@ def init_db() -> None:
               agent_log_max_bytes INTEGER NOT NULL DEFAULT 262144,
               agent_config_version INTEGER NOT NULL DEFAULT 1,
               agent_config_updated_at TEXT,
+              mariadb_available INTEGER NOT NULL DEFAULT 0,
               last_event TEXT, last_event_at TEXT, last_poll_at TEXT, last_payload TEXT,
               created_at TEXT NOT NULL
             );
@@ -305,10 +308,18 @@ def init_db() -> None:
             "agent_log_max_bytes": "INTEGER NOT NULL DEFAULT 262144",
             "agent_config_version": "INTEGER NOT NULL DEFAULT 1",
             "agent_config_updated_at": "TEXT",
+            "mariadb_available": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in client_column_defaults.items():
             if column not in client_columns:
                 connection.execute(f"ALTER TABLE clients ADD COLUMN {column} {definition}")
+        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        if "email" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+        if "receive_notifications" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN receive_notifications INTEGER NOT NULL DEFAULT 0"
+            )
         command_columns = {row[1] for row in connection.execute("PRAGMA table_info(backup_commands)")}
         if "policy_snapshot" not in command_columns:
             connection.execute("ALTER TABLE backup_commands ADD COLUMN policy_snapshot TEXT")
@@ -416,6 +427,33 @@ def init_db() -> None:
                     now_iso(),
                 ),
             )
+        smtp_row = connection.execute(
+            "SELECT recipients_json FROM smtp_settings WHERE id=1"
+        ).fetchone()
+        if smtp_row and not connection.execute(
+            "SELECT 1 FROM users WHERE receive_notifications=1"
+        ).fetchone():
+            try:
+                legacy_recipients = [
+                    str(item).strip()
+                    for item in json.loads(smtp_row["recipients_json"] or "[]")
+                    if str(item).strip() and EMAIL_RE.fullmatch(str(item).strip())
+                ]
+            except (TypeError, json.JSONDecodeError):
+                legacy_recipients = []
+            candidates = connection.execute(
+                "SELECT id,email FROM users WHERE active=1 "
+                "ORDER BY (role='admin') DESC,id"
+            ).fetchall()
+            for candidate, email in zip(candidates, legacy_recipients):
+                connection.execute(
+                    "UPDATE users SET email=?,receive_notifications=1 WHERE id=?",
+                    (email, candidate["id"]),
+                )
+            if legacy_recipients and candidates:
+                connection.execute(
+                    "UPDATE smtp_settings SET recipients_json='[]' WHERE id=1"
+                )
         cloudflare_defaults = ACME_CONFIG.get("cloudflare", {})
         if not isinstance(cloudflare_defaults, dict):
             cloudflare_defaults = {}
@@ -468,23 +506,53 @@ def acme_configuration(*, include_token: bool = False) -> dict[str, Any]:
     return result
 
 
+def normalized_email(value: str) -> str:
+    email = value.strip()
+    if email and (len(email) > 254 or not EMAIL_RE.fullmatch(email)):
+        raise ValueError("Ungueltige E-Mail-Adresse")
+    return email
+
+
+def notification_recipients(connection: sqlite3.Connection | None = None) -> list[str]:
+    owns_connection = connection is None
+    active_connection = connection or db()
+    try:
+        rows = active_connection.execute(
+            "SELECT email FROM users WHERE active=1 AND receive_notifications=1 "
+            "AND TRIM(email)<>'' ORDER BY username"
+        ).fetchall()
+        recipients: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            try:
+                email = normalized_email(str(row["email"]))
+            except ValueError:
+                continue
+            identity = email.casefold()
+            if identity not in seen:
+                seen.add(identity)
+                recipients.append(email)
+        return recipients
+    finally:
+        if owns_connection:
+            active_connection.close()
+
+
 def smtp_configuration() -> dict[str, Any]:
     with db() as connection:
         row = connection.execute("SELECT * FROM smtp_settings WHERE id=1").fetchone()
+        recipients = notification_recipients(connection)
     if not row:
         raise RuntimeError("SMTP ist noch nicht in SQLite konfiguriert")
-    try:
-        recipients = json.loads(row["recipients_json"])
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("SMTP-Empfaenger in SQLite sind ungueltig") from exc
     return {
-        "enabled": bool(row["enabled"]),
+        "enabled": bool(row["enabled"]) and bool(recipients),
+        "configured_enabled": bool(row["enabled"]),
         "host": str(row["host"]),
         "port": int(row["port"]),
         "username": str(row["username"]),
         "password": decrypt_deployment_token(row["password_ciphertext"]) if row["password_ciphertext"] else "",
         "from_address": str(row["from_address"]),
-        "to": [str(item) for item in recipients],
+        "to": recipients,
         "starttls": False,
         "timeout_seconds": int(row["timeout_seconds"]),
     }
@@ -965,17 +1033,21 @@ def smtp_settings_page(request: Request):
     require_user(request, admin=True)
     with db() as connection:
         settings = connection.execute(
-            "SELECT id,enabled,host,port,username,from_address,recipients_json,timeout_seconds,updated_at "
+            "SELECT id,enabled,host,port,username,from_address,timeout_seconds,updated_at "
             "FROM smtp_settings WHERE id=1"
         ).fetchone()
+        recipients = notification_recipients(connection)
     if not settings:
         raise HTTPException(503, "SMTP ist noch nicht initialisiert")
     data = dict(settings)
-    data["to"] = ", ".join(json.loads(data.pop("recipients_json")))
     return render(
         request,
         "smtp_settings.html",
-        {"smtp": data, "message": request.query_params.get("message", "")},
+        {
+            "smtp": data,
+            "recipients": recipients,
+            "message": request.query_params.get("message", ""),
+        },
     )
 
 
@@ -988,7 +1060,6 @@ def smtp_settings_update(
     username: str = Form(""),
     password: str = Form(""),
     from_address: str = Form(...),
-    recipients: str = Form(...),
     timeout_seconds: int = Form(20),
     enabled: str | None = Form(None),
 ):
@@ -996,12 +1067,14 @@ def smtp_settings_update(
     verify_csrf(user, csrf_token)
     host = host.strip()
     username = username.strip()
-    from_address = from_address.strip()
-    recipient_list = [item.strip() for item in recipients.replace(";", ",").split(",") if item.strip()]
+    try:
+        from_address = normalized_email(from_address)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not host or not 1 <= port <= 65535 or not 5 <= timeout_seconds <= 120:
         raise HTTPException(400, "Ungueltiger SMTP-Host, Port oder Timeout")
-    if "@" not in from_address or not recipient_list or any("@" not in item for item in recipient_list):
-        raise HTTPException(400, "Ungueltige SMTP-Absender- oder Empfaengeradresse")
+    if not from_address:
+        raise HTTPException(400, "SMTP-Absenderadresse ist erforderlich")
     with db() as connection:
         current = connection.execute("SELECT password_ciphertext FROM smtp_settings WHERE id=1").fetchone()
         if not current:
@@ -1013,10 +1086,10 @@ def smtp_settings_update(
             raise HTTPException(400, "Fuer SMTP-Authentifizierung ist ein Passwort erforderlich")
         connection.execute(
             "UPDATE smtp_settings SET enabled=?,host=?,port=?,username=?,password_ciphertext=?,from_address=?,"
-            "recipients_json=?,timeout_seconds=?,updated_by=?,updated_at=? WHERE id=1",
+            "timeout_seconds=?,updated_by=?,updated_at=? WHERE id=1",
             (
                 bool(enabled), host, port, username, password_ciphertext, from_address,
-                json.dumps(recipient_list), timeout_seconds, user["id"], now_iso(),
+                timeout_seconds, user["id"], now_iso(),
             ),
         )
         connection.execute(
@@ -2507,8 +2580,9 @@ async def onboard_register(request: Request):
     agent_token = secrets.token_urlsafe(32)
     with db() as connection:
         connection.execute(
-            "UPDATE clients SET source_hostname=?,agent_token_hash=?,last_event='onboarded',last_event_at=? WHERE id=?",
-            (source_hostname, token_hash(agent_token), now_iso(), client["id"]),
+            "UPDATE clients SET source_hostname=?,agent_token_hash=?,mariadb_available=?,"
+            "last_event='onboarded',last_event_at=? WHERE id=?",
+            (source_hostname, token_hash(agent_token), has_mariadb, now_iso(), client["id"]),
         )
         connection.execute("UPDATE deployment_tokens SET used_at=? WHERE token_hash=?", (now_iso(), token["token_hash"]))
     host_key = Path("/etc/ssh/ssh_host_ed25519_key.pub").read_text(encoding="utf-8").split()
@@ -2542,6 +2616,7 @@ def authenticated_agent(request: Request) -> sqlite3.Row:
 
 @app.post("/api/agent/poll")
 async def agent_poll(request: Request):
+    raw_agent_token = bearer(request)
     client = authenticated_agent(request)
     try:
         data = await request.json()
@@ -2550,10 +2625,18 @@ async def agent_poll(request: Request):
     reported_hostname = str(data.get("hostname", "")).strip()
     if reported_hostname and client["source_hostname"] and reported_hostname != client["source_hostname"]:
         raise HTTPException(409, "Source hostname mismatch")
+    try:
+        reported_config_version = int(data.get("config_version", 0))
+    except (TypeError, ValueError):
+        reported_config_version = 0
+    reported_mariadb = bool(data.get("mariadb_available", client["mariadb_available"]))
     claimed_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     with db() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("UPDATE clients SET last_poll_at=? WHERE id=?", (now_iso(), client["id"]))
+        connection.execute(
+            "UPDATE clients SET last_poll_at=?,mariadb_available=? WHERE id=?",
+            (now_iso(), reported_mariadb, client["id"]),
+        )
         connection.execute(
             "UPDATE backup_commands SET status='queued',claimed_at=NULL,message='Claim timeout; erneut freigegeben' "
             "WHERE client_id=? AND status='claimed' AND claimed_at<?",
@@ -2568,17 +2651,28 @@ async def agent_poll(request: Request):
                 "UPDATE backup_commands SET status='claimed',claimed_at=? WHERE id=? AND status='queued'",
                 (now_iso(), command["id"]),
             )
-    if not command:
-        return JSONResponse({"action": "none", "server_time": now_iso()})
-    return JSONResponse(
-        {
+        client = connection.execute("SELECT * FROM clients WHERE id=?", (client["id"],)).fetchone()
+    response: dict[str, Any] = {"action": "none", "server_time": now_iso()}
+    if command:
+        response.update({
             "action": "backup",
             "command_id": command["id"],
             "reason": command["reason"],
             "requested_at": command["requested_at"],
             "policy": json.loads(command["policy_snapshot"]) if command["policy_snapshot"] else None,
+        })
+    if reported_config_version != int(client["agent_config_version"]):
+        refreshed_config = build_agent_config(
+            client,
+            str(client["source_hostname"] or reported_hostname),
+            bool(client["mariadb_available"]),
+            raw_agent_token,
+        ).encode("utf-8")
+        response["config_update"] = {
+            "version": int(client["agent_config_version"]),
+            "content_b64": base64.b64encode(refreshed_config).decode("ascii"),
         }
-    )
+    return JSONResponse(response)
 
 
 @app.post("/api/agent/commands/{command_id}")
@@ -2730,8 +2824,15 @@ async def agent_log_upload(request: Request):
 def users_page(request: Request):
     require_user(request, admin=True)
     with db() as connection:
-        users = connection.execute("SELECT id,username,display_name,role,active,created_at FROM users ORDER BY username").fetchall()
-    return render(request, "users.html", {"users": users, "error": ""})
+        users = connection.execute(
+            "SELECT id,username,display_name,role,email,receive_notifications,active,created_at "
+            "FROM users ORDER BY username"
+        ).fetchall()
+    return render(
+        request,
+        "users.html",
+        {"users": users, "error": "", "message": request.query_params.get("message", "")},
+    )
 
 
 @app.post("/users", response_class=HTMLResponse)
@@ -2741,6 +2842,8 @@ def user_create(
     display_name: str = Form(...),
     password: str = Form(...),
     role: str = Form(...),
+    email: str = Form(""),
+    receive_notifications: str | None = Form(None),
     csrf_token: str = Form(...),
 ):
     user = require_user(request, admin=True)
@@ -2749,16 +2852,73 @@ def user_create(
     if not PORTAL_USER_RE.fullmatch(username) or role not in {"admin", "viewer"}:
         raise HTTPException(400, "Invalid user data")
     try:
+        email = normalized_email(email)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if receive_notifications and not email:
+        raise HTTPException(400, "Fuer Mailbenachrichtigungen ist eine E-Mail-Adresse erforderlich")
+    try:
         encoded = hash_password(password)
         with db() as connection:
             connection.execute(
-                "INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)",
-                (username, display_name.strip() or username, encoded, role, now_iso()),
+                "INSERT INTO users(username,display_name,password_hash,role,email,receive_notifications,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    username, display_name.strip() or username, encoded, role, email,
+                    bool(receive_notifications), now_iso(),
+                ),
             )
+            if receive_notifications:
+                connection.execute(
+                    "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? "
+                    "WHERE active=1",
+                    (now_iso(),),
+                )
     except sqlite3.IntegrityError:
         raise HTTPException(409, "User already exists")
     audit(request, "user.create", username, f"role={role}")
     return RedirectResponse("/users", status_code=303)
+
+
+@app.post("/users/{user_id}/notifications")
+def user_notifications_update(
+    request: Request,
+    user_id: int,
+    email: str = Form(""),
+    receive_notifications: str | None = Form(None),
+    csrf_token: str = Form(...),
+):
+    actor = require_user(request, admin=True)
+    verify_csrf(actor, csrf_token)
+    try:
+        email = normalized_email(email)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if receive_notifications and not email:
+        raise HTTPException(400, "Fuer Mailbenachrichtigungen ist eine E-Mail-Adresse erforderlich")
+    with db() as connection:
+        target = connection.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(404)
+        connection.execute(
+            "UPDATE users SET email=?,receive_notifications=? WHERE id=?",
+            (email, bool(receive_notifications), user_id),
+        )
+        connection.execute(
+            "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? "
+            "WHERE active=1",
+            (now_iso(),),
+        )
+    audit(
+        request,
+        "user.notifications",
+        target["username"],
+        f"email_set={bool(email)} enabled={bool(receive_notifications)}",
+        user_id=actor["id"],
+    )
+    return RedirectResponse(
+        f"/users?message={quote('Benachrichtigungseinstellungen gespeichert')}", status_code=303
+    )
 
 
 @app.post("/users/{user_id}/toggle")
@@ -2777,6 +2937,11 @@ def user_toggle(request: Request, user_id: int, csrf_token: str = Form(...)):
                 raise HTTPException(400, "Letzter Administrator kann nicht deaktiviert werden")
         connection.execute("UPDATE users SET active=? WHERE id=?", (0 if target["active"] else 1, user_id))
         connection.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        connection.execute(
+            "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? "
+            "WHERE active=1",
+            (now_iso(),),
+        )
     audit(request, "user.toggle", target["username"], f"active={not bool(target['active'])}")
     return RedirectResponse("/users", status_code=303)
 

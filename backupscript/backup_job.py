@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import html
 import json
@@ -397,12 +398,57 @@ def status_api_post(cfg: dict[str, Any], endpoint: str, payload: dict[str, Any])
         return json.loads(response.read().decode("utf-8"))
 
 
-def poll_for_command(cfg: dict[str, Any]) -> dict[str, Any] | None:
+def apply_config_update(cfg: dict[str, Any], config_path: str, update: dict[str, Any]) -> None:
+    try:
+        expected_version = int(update["version"])
+        decoded = base64.b64decode(str(update["content_b64"]), validate=True)
+        parsed = tomllib.loads(decoded.decode("utf-8"))
+    except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+        raise RuntimeError("Portal lieferte eine ungueltige Agent-Konfiguration") from exc
+    if int(parsed.get("backup", {}).get("config_version", -1)) != expected_version:
+        raise RuntimeError("Versionsnummer der Portal-Konfiguration ist inkonsistent")
+    path = Path(config_path)
+    if path.is_symlink():
+        raise RuntimeError(f"Agent-Konfiguration darf kein Symlink sein: {path}")
+    temporary = path.with_name(f".{path.name}.raven-{os.getpid()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(decoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    cfg.clear()
+    cfg.update(parsed)
+    LOG.info("Agent-Konfiguration auf Portal-Version %s aktualisiert", expected_version)
+
+
+def poll_for_command(cfg: dict[str, Any], config_path: str) -> dict[str, Any] | None:
     status_cfg = cfg.get("status", {})
     if not bool(status_cfg.get("enabled", False)):
         raise RuntimeError("Zentrale Steuerung ist in [status] deaktiviert")
     endpoint = str(status_cfg.get("poll_endpoint", "")).strip()
-    result = status_api_post(cfg, endpoint, {"hostname": socket.getfqdn(), "time": datetime.now(timezone.utc).isoformat()})
+    result = status_api_post(
+        cfg,
+        endpoint,
+        {
+            "hostname": socket.getfqdn(),
+            "time": datetime.now(timezone.utc).isoformat(),
+            "config_version": int(cfg["backup"].get("config_version", 0)),
+            "mariadb_available": bool(cfg["backup"].get("mariadb_available", False)),
+        },
+    )
+    if isinstance(result.get("config_update"), dict):
+        apply_config_update(cfg, config_path, result["config_update"])
     if result.get("action") == "none":
         return None
     if result.get("action") != "backup" or not isinstance(result.get("command_id"), int):
@@ -1035,7 +1081,7 @@ def main() -> int:
             return 0 if args.poll else 3
         if args.poll:
             try:
-                command = poll_for_command(cfg)
+                command = poll_for_command(cfg, args.config)
             except Exception as exc:
                 LOG.error("Portal-Polling fehlgeschlagen: %s", exc)
                 return 2

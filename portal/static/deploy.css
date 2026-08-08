@@ -152,6 +152,11 @@
 .mode-tar { background: #fff0d6; color: var(--warn); }
 .server-chips { display: flex; flex-wrap: wrap; gap: .6rem; }
 .server-chips a { padding: .45rem .7rem; border-radius: 999px; background: #edf2f4; color: var(--ink); text-decoration: none; font-weight: 700; }
+.server-chips > span:not(.muted) { padding: .45rem .7rem; border-radius: 999px; background: #edf2f4; color: var(--ink); font-weight: 700; }
+.notification-form { display: grid; grid-template-columns: minmax(220px,1fr) auto auto; gap: .75rem; align-items: end; }
+.notification-toggle { display: flex; align-items: center; gap: .5rem; min-height: 43px; }
+.notification-toggle input { width: auto; }
+.notification-check { margin: 0; }
 .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 2rem; border-color: rgba(181,49,49,.35); }
 .danger-zone h2 { margin: .15rem 0 .25rem; }
 .danger-zone p { margin-bottom: 0; }
@@ -166,4 +171,5 @@
   .policy-grid, .policy-create, .policy-path-form { grid-template-columns: 1fr; }
   .policy-path-summary > div { grid-template-columns: 1fr; }
   .danger-zone { align-items: stretch; flex-direction: column; }
+  .notification-form { grid-template-columns: 1fr; }
 }
