@@ -20,11 +20,6 @@ propagation_timeout_seconds = 7200
 poll_interval_seconds = 15
 resolvers = ["1.1.1.1", "8.8.8.8"]
 
-[acme.cloudflare]
-credentials_file = "/etc/backup-portal/cloudflare-acme.toml"
-zone_id = ""
-ttl = 60
-
 [database]
 path = "/var/lib/backup-portal/portal.db"
 
@@ -54,13 +49,3 @@ database_split_threshold_bytes = 2147483648
 [security]
 session_hours = 12
 session_secret = "CHANGE_ME_RANDOM_HEX"
-
-[smtp]
-host = "smtp.example.com"
-port = 25
-username = "backup-notification"
-password = "CHANGE_ME"
-from_address = "backup@example.com"
-to = ["admin@example.com"]
-starttls = false
-timeout_seconds = 20

@@ -225,6 +225,56 @@ except Exception:
 PY
 }
 
+database_setting_value() {
+    local config_file=$1 section=$2 key=$3 fallback=${4-} python_bin=python3
+    [[ -x "$APP_DIR/venv/bin/python" ]] && python_bin="$APP_DIR/venv/bin/python"
+    "$python_bin" - "$config_file" "$section" "$key" "$fallback" <<'PY'
+import base64
+import hashlib
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+config_path, section, key, fallback = sys.argv[1:]
+try:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+    with open(config_path, "rb") as handle:
+        config = tomllib.load(handle)
+    connection = sqlite3.connect(f"file:{Path(config['database']['path'])}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        if section == "smtp":
+            row = connection.execute("SELECT * FROM smtp_settings WHERE id=1").fetchone()
+            column = {"host": "host", "port": "port", "username": "username", "password": "password_ciphertext",
+                      "from_address": "from_address", "to": "recipients_json"}[key]
+        elif section == "cloudflare":
+            row = connection.execute("SELECT * FROM acme_settings WHERE id=1").fetchone()
+            column = {"api_token": "cloudflare_token_ciphertext", "zone_id": "cloudflare_zone_id",
+                      "ttl": "cloudflare_ttl"}[key]
+        else:
+            raise KeyError(section)
+    finally:
+        connection.close()
+    if not row:
+        raise LookupError("setting missing")
+    value = row[column]
+    if key in {"password", "api_token"} and value:
+        from cryptography.fernet import Fernet
+        secret = str(config["security"]["session_secret"])
+        cipher_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+        value = Fernet(cipher_key).decrypt(str(value).encode("ascii")).decode("utf-8")
+    elif key == "to":
+        value = ",".join(str(item) for item in json.loads(value))
+    print(value if value is not None else fallback)
+except Exception:
+    print(fallback)
+PY
+}
+
 ask() {
     local variable=$1 label=$2
     local current=${!variable-} entered=""
@@ -453,11 +503,11 @@ PY
     BACKUP_SSH_PORT=${BACKUP_SSH_PORT:-$(config_value "$CONFIG_FILE" onboarding backup_ssh_port "49150")}
     BACKUP_TARGET_HOSTNAME=${BACKUP_TARGET_HOSTNAME:-$(config_value "$CONFIG_FILE" onboarding remote_hostname "$detected_hostname")}
     ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-    SMTP_HOST=${SMTP_HOST:-$(config_value "$CONFIG_FILE" smtp host "smtp.example.com")}
-    SMTP_PORT=${SMTP_PORT:-$(config_value "$CONFIG_FILE" smtp port "25")}
-    SMTP_USERNAME=${SMTP_USERNAME:-$(config_value "$CONFIG_FILE" smtp username "")}
-    SMTP_FROM=${SMTP_FROM:-$(config_value "$CONFIG_FILE" smtp from_address "backup@example.com")}
-    SMTP_TO=${SMTP_TO:-$(config_value "$CONFIG_FILE" smtp to "")}
+    SMTP_HOST=${SMTP_HOST:-$(database_setting_value "$CONFIG_FILE" smtp host "$(config_value "$CONFIG_FILE" smtp host "smtp.example.com")")}
+    SMTP_PORT=${SMTP_PORT:-$(database_setting_value "$CONFIG_FILE" smtp port "$(config_value "$CONFIG_FILE" smtp port "25")")}
+    SMTP_USERNAME=${SMTP_USERNAME:-$(database_setting_value "$CONFIG_FILE" smtp username "$(config_value "$CONFIG_FILE" smtp username "")")}
+    SMTP_FROM=${SMTP_FROM:-$(database_setting_value "$CONFIG_FILE" smtp from_address "$(config_value "$CONFIG_FILE" smtp from_address "backup@example.com")")}
+    SMTP_TO=${SMTP_TO:-$(database_setting_value "$CONFIG_FILE" smtp to "$(config_value "$CONFIG_FILE" smtp to "")")}
     CHECKER_INTERVAL_MINUTES=${CHECKER_INTERVAL_MINUTES:-$(config_value "$CONFIG_FILE" checker interval_minutes "60")}
     MINIMUM_FREE_PERCENT=${MINIMUM_FREE_PERCENT:-$(config_value "$CHECKER_CONFIG_FILE" storage minimum_free_percent "15")}
     SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-$(config_value "$CHECKER_CONFIG_FILE" cleanup snapshot_retention_days "7")}
@@ -467,7 +517,7 @@ PY
     SMTP_PASSWORD=${SMTP_PASSWORD:-}
     CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
 
-    existing_smtp_password=$(config_value "$CONFIG_FILE" smtp password "")
+    existing_smtp_password=$(database_setting_value "$CONFIG_FILE" smtp password "$(config_value "$CONFIG_FILE" smtp password "")")
     if ((!INTERACTIVE)) && [[ -z "$SMTP_PASSWORD" ]]; then
         SMTP_PASSWORD=$existing_smtp_password
     fi
@@ -503,11 +553,14 @@ PY
     local existing_cloudflare_token configured_cloudflare_credentials
     configured_cloudflare_credentials=$(config_value "$CONFIG_FILE" acme.cloudflare credentials_file "$CLOUDFLARE_CREDENTIALS_FILE")
     existing_cloudflare_token=$(cloudflare_token_value "$configured_cloudflare_credentials")
+    if [[ -z "$existing_cloudflare_token" ]]; then
+        existing_cloudflare_token=$(database_setting_value "$CONFIG_FILE" cloudflare api_token "")
+    fi
     if ((!INTERACTIVE)) && [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
         CLOUDFLARE_API_TOKEN=$existing_cloudflare_token
     fi
-    CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID:-$(config_value "$CONFIG_FILE" acme.cloudflare zone_id "")}
-    CLOUDFLARE_TTL=${CLOUDFLARE_TTL:-$(config_value "$CONFIG_FILE" acme.cloudflare ttl "60")}
+    CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID:-$(database_setting_value "$CONFIG_FILE" cloudflare zone_id "$(config_value "$CONFIG_FILE" acme.cloudflare zone_id "")")}
+    CLOUDFLARE_TTL=${CLOUDFLARE_TTL:-$(database_setting_value "$CONFIG_FILE" cloudflare ttl "$(config_value "$CONFIG_FILE" acme.cloudflare ttl "60")")}
     TLS_CERT_PATH=${TLS_CERT_PATH:-$(config_value "$CONFIG_FILE" server tls_cert "/etc/letsencrypt/live/${PORTAL_FQDN}/fullchain.pem")}
     TLS_KEY_PATH=${TLS_KEY_PATH:-$(config_value "$CONFIG_FILE" server tls_key "/etc/letsencrypt/live/${PORTAL_FQDN}/privkey.pem")}
 
@@ -623,6 +676,8 @@ provision_certificate() {
 [cloudflare]
 api_token = $(toml_quote "$CLOUDFLARE_API_TOKEN")
 api_base = "https://api.cloudflare.com/client/v4"
+zone_id = $(toml_quote "$CLOUDFLARE_ZONE_ID")
+ttl = ${CLOUDFLARE_TTL}
 EOF
         cat >"${TEMP_DIR}/cloudflare-check.toml" <<EOF
 [domain]
@@ -644,9 +699,6 @@ EOF
         install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/domain_config.py" "$APP_DIR/domain_config.py"
         install -o root -g root -m 0755 "${PROJECT_ROOT}/portal/acme_dns_hook.py" "$APP_DIR/acme_dns_hook.py"
         /usr/bin/python3 "$APP_DIR/acme_dns_hook.py" cloudflare-check --config "${TEMP_DIR}/cloudflare-check.toml"
-        if [[ -f "$CLOUDFLARE_CREDENTIALS_FILE" ]]; then
-            install -o root -g root -m 0600 "$CLOUDFLARE_CREDENTIALS_FILE" "${CLOUDFLARE_CREDENTIALS_FILE}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-        fi
         install -o root -g root -m 0600 "${TEMP_DIR}/cloudflare-acme.toml" "$CLOUDFLARE_CREDENTIALS_FILE"
     fi
     if [[ ${TLS_MODE,,} == "letsencrypt-dns-cloudflare" || ${TLS_MODE,,} == "letsencrypt-dns-manual" || ${TLS_MODE,,} == "letsencrypt-dns" ]]; then
@@ -743,11 +795,6 @@ propagation_timeout_seconds = ${ACME_DNS_TIMEOUT_SECONDS}
 poll_interval_seconds = ${ACME_DNS_POLL_SECONDS}
 resolvers = $(toml_array_from_csv "$ACME_DNS_RESOLVERS")
 
-[acme.cloudflare]
-credentials_file = "${CLOUDFLARE_CREDENTIALS_FILE}"
-zone_id = $(toml_quote "$CLOUDFLARE_ZONE_ID")
-ttl = ${CLOUDFLARE_TTL}
-
 [database]
 path = "${DATA_DIR}/portal.db"
 
@@ -777,16 +824,6 @@ database_split_threshold_bytes = 2147483648
 [security]
 session_hours = 12
 session_secret = $(toml_quote "$SESSION_SECRET")
-
-[smtp]
-host = $(toml_quote "$SMTP_HOST")
-port = ${SMTP_PORT}
-username = $(toml_quote "$SMTP_USERNAME")
-password = $(toml_quote "$SMTP_PASSWORD")
-from_address = $(toml_quote "$SMTP_FROM")
-to = $(toml_array_from_csv "$SMTP_TO")
-starttls = false
-timeout_seconds = 20
 EOF
 
     cat >"${TEMP_DIR}/checker.toml" <<EOF
@@ -807,13 +844,13 @@ incomplete_grace_hours = 6
 ignore = []
 
 [smtp]
-enabled = true
-host = $(toml_quote "$SMTP_HOST")
-port = ${SMTP_PORT}
-username = $(toml_quote "$SMTP_USERNAME")
-password = $(toml_quote "$SMTP_PASSWORD")
-from_address = $(toml_quote "$SMTP_FROM")
-to = $(toml_array_from_csv "$SMTP_TO")
+enabled = false
+host = ""
+port = 25
+username = ""
+password = ""
+from_address = ""
+to = []
 starttls = false
 timeout_seconds = 20
 
@@ -944,17 +981,37 @@ ensure_admin() {
     log "SQLite initialisieren und Admin setzen"
     (
         cd "$APP_DIR"
-        BACKUP_PORTAL_CONFIG="$CONFIG_FILE" "$APP_DIR/venv/bin/python" - "$ADMIN_USERNAME" 3<<<"$ADMIN_PASSWORD" <<'PY'
+        BACKUP_PORTAL_CONFIG="$CONFIG_FILE" "$APP_DIR/venv/bin/python" - \
+            "$ADMIN_USERNAME" "$SMTP_HOST" "$SMTP_PORT" "$SMTP_USERNAME" "$SMTP_FROM" "$SMTP_TO" \
+            3<<<"$ADMIN_PASSWORD" 4<<<"$SMTP_PASSWORD" <<'PY'
+import json
 import os
 import sys
 import app
 
 username = sys.argv[1]
+smtp_host, smtp_port, smtp_username, smtp_from, smtp_to = sys.argv[2:7]
 password = os.fdopen(3, encoding="utf-8").read()
 if password.endswith("\n"):
     password = password[:-1]
+smtp_password = os.fdopen(4, encoding="utf-8").read()
+if smtp_password.endswith("\n"):
+    smtp_password = smtp_password[:-1]
 app.init_db()
 with app.db() as connection:
+    current_smtp = connection.execute("SELECT password_ciphertext FROM smtp_settings WHERE id=1").fetchone()
+    smtp_ciphertext = current_smtp["password_ciphertext"] if current_smtp else ""
+    if smtp_password:
+        smtp_ciphertext = app.encrypt_deployment_token(smtp_password)
+    recipients = [item.strip() for item in smtp_to.replace(";", ",").split(",") if item.strip()]
+    connection.execute(
+        "INSERT INTO smtp_settings(id,enabled,host,port,username,password_ciphertext,from_address,"
+        "recipients_json,timeout_seconds,updated_at) VALUES(1,1,?,?,?,?,?,?,20,?) "
+        "ON CONFLICT(id) DO UPDATE SET enabled=1,host=excluded.host,port=excluded.port,"
+        "username=excluded.username,password_ciphertext=excluded.password_ciphertext,"
+        "from_address=excluded.from_address,recipients_json=excluded.recipients_json,updated_at=excluded.updated_at",
+        (smtp_host, int(smtp_port), smtp_username, smtp_ciphertext, smtp_from, json.dumps(recipients), app.now_iso()),
+    )
     existing = connection.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
     encoded = app.hash_password(password)
     if existing:

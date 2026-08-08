@@ -30,7 +30,7 @@ journalctl -u backup-portal
 systemctl restart backup-portal
 ```
 
-Die zentrale Domainkonfiguration sowie Listener-, TLS-, ACME- und Onboarding-Einstellungen liegen in `/etc/backup-portal/config.toml`. `[domain].tld` und die optionale `[domain].subdomain` bestimmen gemeinsam Portal-URL, Curl-Onboarding, Agent-Endpunkte, SSH-Ziel, Trusted Hosts, Zertifikatsnamen und Cloudflare-Zone. Nach Änderungen ist ein Service-Neustart notwendig. Im Modus `dns-cloudflare` legt der Certbot-Auth-Hook den erforderlichen DNS-01-TXT-Record per Cloudflare API an, persistiert den Status für das admin-only Menü **Zertifikate**, wartet auf öffentliche Propagation und löscht exakt die erzeugte Record-ID nach der Validierung. Das API-Token kann im Menü **Zertifikate** gesetzt und rotiert werden und liegt getrennt root-only in `/etc/backup-portal/cloudflare-acme.toml`; alternativ kann `credentials_file` auf eine vorhandene Certbot-INI-Datei mit `dns_cloudflare_api_token` zeigen. `backup-portal-cert-renew.timer` prüft täglich auf erforderliche Erneuerungen. Nach einer Ausstellung wird der Portalprozess neu gestartet und lädt das rotierte Zertifikat. `dns-manual` bleibt als Provider-unabhängiger Fallback erhalten.
+Die zentrale Domainkonfiguration sowie Listener-, TLS- und Onboarding-Basiswerte liegen in `/etc/backup-portal/config.toml`. `[domain].tld` und die optionale `[domain].subdomain` bestimmen gemeinsam Portal-URL, Curl-Onboarding, Agent-Endpunkte, SSH-Ziel, Trusted Hosts und Zertifikatsnamen. Im Modus `dns-cloudflare` legt der Certbot-Auth-Hook den erforderlichen DNS-01-TXT-Record per Cloudflare API an, persistiert den Status für das admin-only Menü **Zertifikate**, wartet auf öffentliche Propagation und löscht exakt die erzeugte Record-ID nach der Validierung. Token, Zone-ID und TTL werden im Webinterface verwaltet und verschlüsselt in SQLite gespeichert. Eine vorhandene Legacy-Credentials-Datei wird einmalig importiert und anschließend entfernt. `backup-portal-cert-renew.timer` prüft täglich auf erforderliche Erneuerungen. Nach einer Ausstellung wird der Portalprozess neu gestartet und lädt das rotierte Zertifikat. `dns-manual` bleibt als Provider-unabhängiger Fallback erhalten.
 
 SMTP wird nach der Erstinitialisierung zentral aus der SQLite-Tabelle `smtp_settings` gelesen. Das Passwort liegt dort mit dem Portal-Master-Secret verschlüsselt. Änderungen erfolgen admin-only unter **SMTP** und erhöhen die Agent-Konfigurationsversion. Checker und Agent verwenden ausschließlich Plain-SMTP; STARTTLS und SMTPS werden nicht aufgerufen.
 
@@ -47,9 +47,8 @@ Der zentrale Checker läuft als eigener Worker innerhalb des Portalprozesses. Ak
 - `/opt/backup-portal`: Anwendung und Bootstrap-/Agent-Assets
 - `/opt/backup-portal/checker/backup_check.py`: vom Portal verwalteter Checker
 - `/opt/backup-portal/acme_{manager,dns_hook}.py`: DNS-01-Anforderung, Status und Propagationsprüfung
-- `/etc/backup-portal/backup-check.toml`: geheime Checker-Konfiguration, Modus `0600`
-- `/etc/backup-portal/cloudflare-acme.toml`: ausschließlich das scoped Cloudflare-API-Token, Modus `0600`
-- `/etc/backup-portal/config.toml`: geheime Produktionskonfiguration, Modus `0600`
+- `/etc/backup-portal/backup-check.toml`: root-only Checker-Basiskonfiguration ohne SMTP-Secret, Modus `0600`
+- `/etc/backup-portal/config.toml`: root-only Portal-Basiskonfiguration und internes Master-Secret, Modus `0600`
 - `/var/lib/backup-portal/portal.db`: Benutzer, Tokens, Audit- und Agentereignisse, Modus `0600`
 - `/etc/systemd/system/backup-portal.service`: systemd-Dienst
 - `/etc/letsencrypt/renewal-hooks/deploy/restart-backup-portal`: TLS-Renewal-Hook

@@ -44,7 +44,7 @@ Alle vom Betreiber verwalteten Secrets lassen sich im Webinterface setzen oder r
 - Cloudflare API-Token unter **Zertifikate**; der Wert wird nach dem Speichern nie wieder angezeigt
 - Deployment- und Agent-Tokens werden vom Portal erzeugt und nicht als Klartext in SQLite gespeichert
 
-Das interne Session-/Verschlüsselungssecret wird bei der Installation zufällig erzeugt und root-only gespeichert. Cloudflare-Credentials und Laufzeitkonfigurationen liegen mit Modus `0600` außerhalb des Repositorys. Die `.gitignore` schließt typische Secret-, Schlüssel-, Datenbank- und Laufzeitdateien aus.
+Das interne Session-/Verschlüsselungssecret wird bei der Installation zufällig erzeugt und root-only gespeichert. SMTP-Passwort und Cloudflare-Token liegen ausschließlich verschlüsselt in SQLite; die TOML-Dateien enthalten nach abgeschlossener Installation keine Betreiber-Zugangsdaten. Die `.gitignore` schließt typische Secret-, Schlüssel-, Datenbank- und Laufzeitdateien aus.
 
 SMTP ist absichtlich auf unverschlüsseltes Plain-SMTP ohne STARTTLS oder SMTPS beschränkt. Verwende dafür ausschließlich einen vertrauenswürdigen internen SMTP-Relay beziehungsweise einen anderweitig geschützten Netzwerkpfad; Anmeldedaten und Mailinhalt sind auf einem ungeschützten Transportweg sonst mitlesbar.
 
@@ -114,7 +114,7 @@ SMTP wird bei der Initialisierung in die eingebettete SQLite-Datenbank übernomm
 Nach der Abfrage erledigt das Skript automatisch:
 
 - Bereitstellung der Anwendung unter `/opt/backup-portal` in einer isolierten Python-Umgebung
-- Erzeugung der geheimen TOML-Konfigurationen mit Modus `0600`
+- Erzeugung minimierter root-only TOML-Basiskonfigurationen ohne SMTP- oder Cloudflare-Zugangsdaten
 - Initialisierung bzw. Migration der eingebetteten SQLite-Datenbank
 - Anlage oder Aktualisierung des lokalen Admin-Kontos
 - optionalen Import vorhandener `backup_*`-Systembenutzer
@@ -176,7 +176,7 @@ Für `TLS_MODE=existing` müssen zusätzlich `TLS_CERT_PATH` und `TLS_KEY_PATH` 
 
 `letsencrypt-dns-cloudflare` ist der empfohlene Modus und benötigt keinen lokalen Nginx, Apache oder Listener auf Port 80. Der Installer prüft zuerst das Cloudflare-Token und ermittelt die Zone anhand der optional angegebenen Zone-ID oder automatisch anhand des Zertifikatsnamens. Certbot erzeugt anschließend einen DNS-01-Token; der Hook legt exakt diesen TXT-Record über die Cloudflare API an, wartet auf die Sichtbarkeit über alle konfigurierten Resolver und löscht exakt die zurückgelieferte Record-ID nach der Validierung wieder.
 
-Das Token wird verdeckt abgefragt und ausschließlich in `/etc/backup-portal/cloudflare-acme.toml` mit Modus `0600` gespeichert. Administratoren können es später unter **Zertifikate** ersetzen oder entfernen; das Portal zeigt weder Token noch API-Header an. Empfohlen ist ein eigenes API-Token, das auf genau die Zertifikatszone beschränkt ist. Bei gesetzter `CLOUDFLARE_ZONE_ID` genügt `Zone DNS Edit`; für die automatische Zonensuche wird zusätzlich `Zone Read` benötigt. Globale API-Keys werden nicht unterstützt.
+Das Token wird bei der Erstinstallation verdeckt abgefragt, nach der Zertifikatsausstellung verschlüsselt in SQLite übernommen und aus der temporären Credentials-Datei entfernt. Danach werden Token, optionale Zone-ID und TTL ausschließlich unter **Zertifikate** verwaltet. Das Portal zeigt weder Token noch API-Header an. Empfohlen ist ein eigenes API-Token, das auf genau die Zertifikatszone beschränkt ist. Bei gesetzter Zone-ID genügt `Zone DNS Edit`; für die automatische Zonensuche wird zusätzlich `Zone Read` benötigt. Globale API-Keys werden nicht unterstützt.
 
 Der Datensatz hat dieses Schema:
 

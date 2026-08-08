@@ -1,3 +1,0 @@
-[cloudflare]
-api_token = "CHANGE_ME_SCOPED_ZONE_DNS_EDIT_TOKEN"
-api_base = "https://api.cloudflare.com/client/v4"

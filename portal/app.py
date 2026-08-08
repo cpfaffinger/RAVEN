@@ -58,7 +58,7 @@ ACME_CONFIG["domain"] = PORTAL_FQDN
 ACME_CONFIG["cloudflare"] = dict(ACME_CONFIG.get("cloudflare", {}))
 ACME_CONFIG["cloudflare"]["zone_name"] = str(DOMAIN_CONFIG["tld"])
 ACME_STATE_DIR = Path(ACME_CONFIG.get("state_dir", "/var/lib/backup-portal/acme"))
-CLOUDFLARE_CREDENTIALS_PATH = Path(
+LEGACY_CLOUDFLARE_CREDENTIALS_PATH = Path(
     str(ACME_CONFIG["cloudflare"].get("credentials_file", "/etc/backup-portal/cloudflare-acme.toml"))
 )
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
@@ -142,6 +142,34 @@ def db() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
+
+
+def legacy_cloudflare_credentials() -> dict[str, Any]:
+    """Read the former root-only credential file once for SQLite migration."""
+    path = LEGACY_CLOUDFLARE_CREDENTIALS_PATH
+    try:
+        file_stat = path.lstat()
+        if (
+            not statlib.S_ISREG(file_stat.st_mode)
+            or path.is_symlink()
+            or file_stat.st_uid != 0
+            or statlib.S_IMODE(file_stat.st_mode) & 0o077
+            or file_stat.st_size > 64 * 1024
+        ):
+            return {}
+        if path.suffix.lower() == ".toml":
+            with path.open("rb") as handle:
+                values = tomllib.load(handle).get("cloudflare", {})
+            return dict(values) if isinstance(values, dict) else {}
+        values: dict[str, str] = {}
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith(("#", ";")) and "=" in line:
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip()
+        return {"api_token": values.get("dns_cloudflare_api_token", "")}
+    except (FileNotFoundError, OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
+        return {}
 
 
 def init_db() -> None:
@@ -239,6 +267,13 @@ def init_db() -> None:
               username TEXT NOT NULL DEFAULT '', password_ciphertext TEXT NOT NULL DEFAULT '',
               from_address TEXT NOT NULL, recipients_json TEXT NOT NULL,
               timeout_seconds INTEGER NOT NULL DEFAULT 20,
+              updated_by INTEGER REFERENCES users(id), updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS acme_settings (
+              id INTEGER PRIMARY KEY CHECK(id=1),
+              cloudflare_token_ciphertext TEXT NOT NULL DEFAULT '',
+              cloudflare_zone_id TEXT NOT NULL DEFAULT '',
+              cloudflare_ttl INTEGER NOT NULL DEFAULT 60,
               updated_by INTEGER REFERENCES users(id), updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS checker_runs (
@@ -381,7 +416,56 @@ def init_db() -> None:
                     now_iso(),
                 ),
             )
+        cloudflare_defaults = ACME_CONFIG.get("cloudflare", {})
+        if not isinstance(cloudflare_defaults, dict):
+            cloudflare_defaults = {}
+        legacy_cloudflare = legacy_cloudflare_credentials()
+        legacy_token = str(legacy_cloudflare.get("api_token", "")).strip()
+        existing_acme = connection.execute("SELECT * FROM acme_settings WHERE id=1").fetchone()
+        if not existing_acme:
+            connection.execute(
+                "INSERT INTO acme_settings(id,cloudflare_token_ciphertext,cloudflare_zone_id,cloudflare_ttl,updated_at) "
+                "VALUES(1,?,?,?,?)",
+                (
+                    encrypt_deployment_token(legacy_token) if legacy_token else "",
+                    str(legacy_cloudflare.get("zone_id", cloudflare_defaults.get("zone_id", ""))).strip(),
+                    int(legacy_cloudflare.get("ttl", cloudflare_defaults.get("ttl", 60))),
+                    now_iso(),
+                ),
+            )
+        elif legacy_token:
+            connection.execute(
+                "UPDATE acme_settings SET cloudflare_token_ciphertext=?,updated_at=? WHERE id=1",
+                (encrypt_deployment_token(legacy_token), now_iso()),
+            )
     os.chmod(DB_PATH, 0o600)
+    if (
+        legacy_token
+        and LEGACY_CLOUDFLARE_CREDENTIALS_PATH == Path("/etc/backup-portal/cloudflare-acme.toml")
+        and not LEGACY_CLOUDFLARE_CREDENTIALS_PATH.is_symlink()
+    ):
+        try:
+            LEGACY_CLOUDFLARE_CREDENTIALS_PATH.unlink()
+            LOG.info("Legacy-Cloudflare-Credentials nach SQLite-Migration entfernt")
+        except FileNotFoundError:
+            pass
+
+
+def acme_configuration(*, include_token: bool = False) -> dict[str, Any]:
+    with db() as connection:
+        row = connection.execute("SELECT * FROM acme_settings WHERE id=1").fetchone()
+    if not row:
+        return {"token_configured": False, "zone_id": "", "ttl": 60}
+    token = decrypt_deployment_token(row["cloudflare_token_ciphertext"]) if row["cloudflare_token_ciphertext"] else ""
+    result = {
+        "token_configured": bool(token),
+        "zone_id": row["cloudflare_zone_id"],
+        "ttl": int(row["cloudflare_ttl"]),
+        "updated_at": row["updated_at"],
+    }
+    if include_token:
+        result["api_token"] = token
+    return result
 
 
 def smtp_configuration() -> dict[str, Any]:
@@ -821,31 +905,17 @@ def readiness_result() -> tuple[bool, dict[str, Any]]:
         acme_hook = Path(ACME_CONFIG.get("hook", "/opt/backup-portal/acme_dns_hook.py"))
         checks["acme_dns_hook"] = acme_hook.is_file() and os.access(acme_hook, os.R_OK)
     if ACME_CONFIG.get("mode") == "dns-cloudflare":
-        cloudflare = ACME_CONFIG.get("cloudflare", {})
-        credentials_path = Path(
-            str(cloudflare.get("credentials_file", "/etc/backup-portal/cloudflare-acme.toml"))
-            if isinstance(cloudflare, dict)
-            else "/etc/backup-portal/cloudflare-acme.toml"
-        )
         try:
-            credentials_stat = credentials_path.lstat()
-            checks["cloudflare_credentials"] = (
-                statlib.S_ISREG(credentials_stat.st_mode)
-                and not credentials_path.is_symlink()
-                and credentials_stat.st_uid == 0
-                and statlib.S_IMODE(credentials_stat.st_mode) & 0o077 == 0
-                and os.access(credentials_path, os.R_OK)
-            )
-        except OSError:
-            checks["cloudflare_credentials"] = False
+            checks["cloudflare_token_configured"] = bool(acme_configuration()["token_configured"])
+        except Exception as exc:
+            checks["cloudflare_token_configured"] = False
+            checks["cloudflare_token_error"] = type(exc).__name__
     critical = [
         "database", "backup_script", "bootstrap_script", "home_root", "token_encryption",
         "scheduler", "checker_script", "checker_config", "checker_worker",
     ]
     if ACME_CONFIG.get("mode") in {"dns-manual", "dns-cloudflare"}:
         critical.append("acme_dns_hook")
-    if ACME_CONFIG.get("mode") == "dns-cloudflare":
-        critical.append("cloudflare_credentials")
     return all(checks.get(name) is True for name in critical), checks
 
 
@@ -970,68 +1040,6 @@ def read_acme_state(name: str) -> dict[str, Any]:
         return {}
 
 
-def cloudflare_credentials_status() -> dict[str, Any]:
-    """Report credential presence and file safety without exposing the token."""
-    result: dict[str, Any] = {
-        "configured": False,
-        "secure": False,
-        "path": str(CLOUDFLARE_CREDENTIALS_PATH),
-    }
-    try:
-        file_stat = CLOUDFLARE_CREDENTIALS_PATH.lstat()
-        result["secure"] = (
-            statlib.S_ISREG(file_stat.st_mode)
-            and not CLOUDFLARE_CREDENTIALS_PATH.is_symlink()
-            and file_stat.st_uid == 0
-            and statlib.S_IMODE(file_stat.st_mode) & 0o077 == 0
-        )
-        if not result["secure"] or file_stat.st_size > 64 * 1024:
-            return result
-        if CLOUDFLARE_CREDENTIALS_PATH.suffix.lower() == ".toml":
-            with CLOUDFLARE_CREDENTIALS_PATH.open("rb") as handle:
-                cloudflare = tomllib.load(handle).get("cloudflare", {})
-            token = str(cloudflare.get("api_token", "")) if isinstance(cloudflare, dict) else ""
-        else:
-            values: dict[str, str] = {}
-            for raw_line in CLOUDFLARE_CREDENTIALS_PATH.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if line and not line.startswith(("#", ";")) and "=" in line:
-                    key, value = line.split("=", 1)
-                    values[key.strip()] = value.strip()
-            token = values.get("dns_cloudflare_api_token", "")
-        result["configured"] = bool(re.fullmatch(r"[A-Za-z0-9_-]{20,512}", token))
-    except (FileNotFoundError, OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
-        pass
-    return result
-
-
-def write_cloudflare_api_token(token: str) -> None:
-    """Atomically store the Cloudflare token in the root-only credentials file."""
-    if not CLOUDFLARE_CREDENTIALS_PATH.is_absolute():
-        raise ValueError("Cloudflare-Credentials-Pfad muss absolut sein")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{20,512}", token):
-        raise ValueError("Cloudflare API-Token hat ein ungueltiges Format")
-    parent = CLOUDFLARE_CREDENTIALS_PATH.parent
-    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = parent / f".{CLOUDFLARE_CREDENTIALS_PATH.name}.{secrets.token_hex(8)}.tmp"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            if CLOUDFLARE_CREDENTIALS_PATH.suffix.lower() == ".toml":
-                handle.write("[cloudflare]\napi_token = " + json.dumps(token) + "\n")
-            else:
-                handle.write("dns_cloudflare_api_token = " + token + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, CLOUDFLARE_CREDENTIALS_PATH)
-        os.chmod(CLOUDFLARE_CREDENTIALS_PATH, 0o600)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
 def certificate_details() -> dict[str, Any]:
     certificate_path = Path(str(CONFIG["server"]["tls_cert"]))
     result: dict[str, Any] = {"path": str(certificate_path), "available": False}
@@ -1084,14 +1092,14 @@ def certificates_page(request: Request):
     challenges_state = read_acme_state("challenges.json")
     challenges = list(reversed(challenges_state.get("challenges", [])))
     challenge_running = any(item.get("status") in {"creating_dns", "waiting_dns", "propagated"} for item in challenges)
+    cloudflare_settings = acme_configuration()
     return render(
         request,
         "certificates.html",
         {
             "certificate": certificate_details(),
             "acme": ACME_CONFIG,
-            "cloudflare": ACME_CONFIG.get("cloudflare", {}) if isinstance(ACME_CONFIG.get("cloudflare", {}), dict) else {},
-            "cloudflare_credentials": cloudflare_credentials_status(),
+            "cloudflare": cloudflare_settings,
             "challenges": challenges,
             "job": read_acme_state("job.json"),
             "renewal_running": systemd_active("backup-portal-cert-renew.service"),
@@ -1107,6 +1115,8 @@ def cloudflare_credentials_update(
     request: Request,
     csrf_token: str = Form(...),
     api_token: str = Form(""),
+    zone_id: str = Form(""),
+    ttl: int = Form(60),
     remove_token: str | None = Form(None),
 ):
     user = require_user(request, admin=True)
@@ -1115,22 +1125,34 @@ def cloudflare_credentials_update(
         raise HTTPException(400, "Cloudflare-DNS ist nicht aktiviert")
     if systemd_active("backup-portal-cert-renew.service"):
         raise HTTPException(409, "Cloudflare-Zugangsdaten koennen waehrend einer Zertifikatsanforderung nicht geaendert werden")
-    if remove_token:
-        try:
-            if CLOUDFLARE_CREDENTIALS_PATH.is_symlink():
-                raise HTTPException(400, "Cloudflare-Credentials-Datei darf kein Symlink sein")
-            CLOUDFLARE_CREDENTIALS_PATH.unlink(missing_ok=True)
-        except OSError as exc:
-            raise HTTPException(500, f"Cloudflare API-Token konnte nicht entfernt werden: {type(exc).__name__}") from exc
-        audit(request, "cloudflare.credentials", PORTAL_FQDN, "removed", user_id=user["id"])
-        return RedirectResponse("/certificates?message=Cloudflare-API-Token+entfernt", status_code=303)
+    zone_id = zone_id.strip()
+    if zone_id and not re.fullmatch(r"[A-Fa-f0-9]{32}", zone_id):
+        raise HTTPException(400, "Cloudflare Zone-ID muss leer oder 32 Hex-Zeichen lang sein")
+    if ttl != 1 and not 60 <= ttl <= 86400:
+        raise HTTPException(400, "Cloudflare TTL muss 1 oder 60 bis 86400 Sekunden sein")
     api_token = api_token.strip()
-    try:
-        write_cloudflare_api_token(api_token)
-    except (OSError, ValueError) as exc:
-        raise HTTPException(400, str(exc)) from exc
-    audit(request, "cloudflare.credentials", PORTAL_FQDN, "updated", user_id=user["id"])
-    return RedirectResponse("/certificates?message=Cloudflare-API-Token+gespeichert", status_code=303)
+    if api_token and not re.fullmatch(r"[A-Za-z0-9_-]{20,512}", api_token):
+        raise HTTPException(400, "Cloudflare API-Token hat ein ungueltiges Format")
+    with db() as connection:
+        current = connection.execute(
+            "SELECT cloudflare_token_ciphertext FROM acme_settings WHERE id=1"
+        ).fetchone()
+        if not current:
+            raise HTTPException(503, "ACME-Einstellungen sind noch nicht initialisiert")
+        token_ciphertext = current["cloudflare_token_ciphertext"]
+        if remove_token:
+            token_ciphertext = ""
+        elif api_token:
+            token_ciphertext = encrypt_deployment_token(api_token)
+        connection.execute(
+            "UPDATE acme_settings SET cloudflare_token_ciphertext=?,cloudflare_zone_id=?,cloudflare_ttl=?,"
+            "updated_by=?,updated_at=? WHERE id=1",
+            (token_ciphertext, zone_id, ttl, user["id"], now_iso()),
+        )
+    action = "removed" if remove_token else "updated"
+    audit(request, "cloudflare.credentials", PORTAL_FQDN, f"{action} zone_id={'set' if zone_id else 'auto'} ttl={ttl}", user_id=user["id"])
+    message = "Cloudflare-API-Token+entfernt" if remove_token else "Cloudflare-Einstellungen+gespeichert"
+    return RedirectResponse(f"/certificates?message={message}", status_code=303)
 
 
 @app.post("/certificates/request")
@@ -2123,6 +2145,7 @@ def client_detail(request: Request, client_id: int):
             "policy": dict(policy) if policy else None,
             "policy_paths": policy_paths,
             "policies": policies,
+            "message": request.query_params.get("message", ""),
         },
     )
 
@@ -2196,17 +2219,22 @@ def client_policy_assign(
         ).fetchone()
         if not client or not policy:
             raise HTTPException(404)
-        active = connection.execute(
-            "SELECT 1 FROM backup_commands WHERE client_id=? AND status IN ('queued','claimed','running')", (client_id,)
-        ).fetchone()
-        if active:
-            raise HTTPException(409, "Policy kann waehrend eines aktiven Auftrags nicht gewechselt werden")
+        previous_policy_id = int(client["policy_id"])
+        if previous_policy_id == policy_id:
+            return RedirectResponse(
+                f"/clients/{client_id}?message={quote('Diese Policy ist bereits zugewiesen')}", status_code=303
+            )
         connection.execute(
             "UPDATE clients SET policy_id=?,agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE id=?",
             (policy_id, now_iso(), client_id),
         )
-    audit(request, "client.policy_assign", client["slug"], f"policy={policy['name']}", user_id=user["id"])
-    return RedirectResponse(f"/clients/{client_id}", status_code=303)
+    audit(
+        request, "client.policy_assign", client["slug"],
+        f"old_policy_id={previous_policy_id} new_policy_id={policy_id} policy={policy['name']}", user_id=user["id"],
+    )
+    return RedirectResponse(
+        f"/clients/{client_id}?message={quote('Backup-Policy wurde zugewiesen')}", status_code=303
+    )
 
 
 @app.post("/clients/{client_id}/backup/trigger")

@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
@@ -176,7 +178,42 @@ def load_cloudflare_credentials(path: Path) -> dict[str, Any]:
     return {"api_token": token}
 
 
+def load_database_cloudflare_settings(config: dict[str, Any]) -> dict[str, Any]:
+    database = config.get("database", {})
+    security = config.get("security", {})
+    if not isinstance(database, dict) or not isinstance(security, dict) or not database.get("path"):
+        return {}
+    secret = str(security.get("session_secret", ""))
+    if len(secret) < 32:
+        raise RuntimeError("Portal-Master-Secret fehlt fuer Cloudflare-Entschluesselung")
+    from cryptography.fernet import Fernet, InvalidToken
+
+    database_path = Path(str(database["path"]))
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True, timeout=30)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute("SELECT * FROM acme_settings WHERE id=1").fetchone()
+    finally:
+        connection.close()
+    if not row:
+        return {}
+    ciphertext = str(row["cloudflare_token_ciphertext"] or "")
+    token = ""
+    if ciphertext:
+        key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+        try:
+            token = Fernet(key).decrypt(ciphertext.encode("ascii")).decode("utf-8")
+        except InvalidToken as exc:
+            raise RuntimeError("Cloudflare API-Token in SQLite kann nicht entschluesselt werden") from exc
+    return {
+        "api_token": token,
+        "zone_id": str(row["cloudflare_zone_id"] or ""),
+        "ttl": int(row["cloudflare_ttl"]),
+    }
+
+
 def cloudflare_settings(path: str) -> dict[str, Any] | None:
+    raw_config: dict[str, Any] = {}
     if path:
         config_path = Path(path)
         if config_path.suffix.lower() != ".toml":
@@ -193,7 +230,9 @@ def cloudflare_settings(path: str) -> dict[str, Any] | None:
             if len(token) < 20:
                 raise RuntimeError("Cloudflare API-Token fehlt oder ist zu kurz")
             return settings
-    acme = load_acme_config(path)
+    acme = raw_config.get("acme", {}) if raw_config else load_acme_config(path)
+    if not isinstance(acme, dict):
+        acme = {}
     if acme.get("mode") != "dns-cloudflare":
         return None
     settings = acme.get("cloudflare", {})
@@ -203,8 +242,11 @@ def cloudflare_settings(path: str) -> dict[str, Any] | None:
     resolved_domain = resolve_domain_config(raw_config)
     settings["domain"] = str(resolved_domain["fqdn"])
     settings["zone_name"] = str(resolved_domain["tld"])
+    database_settings = load_database_cloudflare_settings(raw_config)
+    if database_settings:
+        settings = {**settings, **database_settings}
     credentials_file = str(settings.get("credentials_file", ""))
-    if credentials_file:
+    if not database_settings and credentials_file:
         credentials = load_cloudflare_credentials(Path(credentials_file))
         settings = {**settings, **credentials}
     token = str(settings.get("api_token", ""))

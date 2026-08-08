@@ -21,12 +21,12 @@ ignore = []
 # max_age_hours_by_user = { backup_weekly = 192 }
 
 [smtp]
-enabled = true
-host = "smtp.example.com"
+enabled = false
+host = ""
 port = 25
-username = "backup-notification"
-password = "CHANGE_ME"
-from_address = "backup@example.com"
+username = ""
+password = ""
+from_address = ""
 to = []
 starttls = false
 timeout_seconds = 20
