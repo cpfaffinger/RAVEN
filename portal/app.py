@@ -1854,6 +1854,14 @@ def logout(request: Request, csrf_token: str = Form(...)):
     return response
 
 
+def system_account_exists(username: str) -> bool:
+    try:
+        pwd.getpwnam(str(username))
+    except KeyError:
+        return False
+    return True
+
+
 def agent_state(client: dict[str, Any], current_script_digest: str) -> dict[str, Any]:
     """Classify how far a source server has been converted to the RAVEN agent.
 
@@ -1899,7 +1907,11 @@ def dashboard(request: Request, sort: str = "server", direction: str = "asc"):
         current_script_digest = ""
     counts = {"OK": 0, "STALE": 0, "ERROR": 0, "UNKNOWN": 0}
     pending_agents = 0
+    orphaned = 0
     for client in clients:
+        client["account_exists"] = system_account_exists(client["username"])
+        if not client["account_exists"]:
+            orphaned += 1
         agent = agent_state(client, current_script_digest)
         client["agent_state"] = agent["state"]
         client["agent_label"] = agent["label"]
@@ -1953,8 +1965,10 @@ def dashboard(request: Request, sort: str = "server", direction: str = "asc"):
             "clients": clients,
             "counts": counts,
             "pending_agents": pending_agents,
+            "orphaned": orphaned,
             "sort": sort,
             "direction": direction,
+            "message": request.query_params.get("message", ""),
         },
     )
 
@@ -2978,6 +2992,8 @@ def client_detail(request: Request, client_id: int):
             "policy_mail_summary": policy_mail_summary(policy) if policy else "unbekannt",
             "policies": policies,
             "schedule": schedule_state,
+            "account_exists": system_account_exists(client["username"]),
+            "home_exists": Path(client["home_path"]).is_dir(),
             "message": request.query_params.get("message", ""),
         },
     )
@@ -3066,6 +3082,40 @@ def client_policy_assign(
     return RedirectResponse(
         f"/clients/{client_id}?message={quote('Backup-Policy wurde zugewiesen')}", status_code=303
     )
+
+
+@app.post("/clients/{client_id}/delete")
+def client_delete(request: Request, client_id: int, csrf_token: str = Form(...)):
+    """Remove a server whose Linux target account no longer exists.
+
+    As long as the account is present the entry is authoritative: the agent may
+    still deliver, and the startup import would recreate the row anyway. Only an
+    orphaned entry can be dropped, and only from the database — whatever is left
+    in the home directory stays untouched.
+    """
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    with db() as connection:
+        client = connection.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not client:
+            raise HTTPException(404)
+        username = str(client["username"])
+        if system_account_exists(username):
+            raise HTTPException(
+                409,
+                f"Systemkonto {username} existiert noch; der Server kann erst nach dem Entfernen des Kontos "
+                "aus dem Portal geloescht werden",
+            )
+        connection.execute("DELETE FROM clients WHERE id=?", (client_id,))
+    home_left = Path(str(client["home_path"])).is_dir()
+    audit(
+        request, "client.delete", str(client["slug"]),
+        f"username={username} home_left={home_left}", user_id=user["id"],
+    )
+    message = f"Server {client['slug']} wurde aus dem Portal entfernt"
+    if home_left:
+        message += f"; {client['home_path']} enthält weiterhin Daten und bleibt unverändert"
+    return RedirectResponse(f"/?message={quote(message)}", status_code=303)
 
 
 @app.post("/clients/{client_id}/backup/trigger")

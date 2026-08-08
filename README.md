@@ -221,6 +221,12 @@ Diese Selbstaktualisierung kann erst greifen, wenn auf der Quelle einmal ein Age
 
 Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem Anderthalbfachen des Intervalls, für den Tagesplan also weiterhin nach 36 Stunden. Ein Eintrag unter `max_age_hours_by_user` in `backup-check.toml` bleibt eine bewusste manuelle Ausnahme und hat Vorrang.
 
+## Server aus dem Portal entfernen
+
+Ein Server bleibt in der Übersicht, solange sein Linux-Zielkonto besteht – der Bestandsimport beim Portalstart würde einen gelöschten Eintrag ohnehin wieder anlegen. Wurde das Konto auf dem Zielserver entfernt, meldet die Übersicht **Systemkonto fehlt** und zählt den Eintrag unter **Konto fehlt**. Über **Entfernen** in der Zeile oder den Gefahrenbereich der Serverdetails lässt er sich dann dauerhaft löschen; entfernt werden Eintrag, Aufträge, Ereignisse, Laufprotokolle und Deployment-Tokens.
+
+Das Home-Verzeichnis rührt RAVEN dabei nicht an. Sind dort noch Sicherungen abgelegt, weist das Portal darauf hin und die Daten bleiben liegen, bis sie bewusst entfernt werden.
+
 ## Benachrichtigungen
 
 Ob eine Mail entsteht, entscheidet die Stelle, die sie auslöst. Empfänger sind in beiden Fällen die aktiven Portal-Benutzer mit hinterlegter Adresse und aktivierter Mailoption; ist SMTP abgeschaltet, versendet keine der beiden Seiten etwas.

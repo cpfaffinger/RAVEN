@@ -130,6 +130,7 @@
 .status.agent-outdated { background: #e7eef8; color: #315d91; }
 .status.agent-legacy, .status.agent-offline { background: #fff0d6; color: var(--warn); }
 .status.agent-unconverted { background: #fae5e5; color: var(--bad); }
+.remove-link { display: block; margin-top: .3rem; color: var(--bad) !important; }
 .control-panel .force-option { display: flex; align-items: center; gap: .45rem; font-size: 12px; margin-bottom: .6rem; }
 .control-panel .force-option input { width: auto; }
 
