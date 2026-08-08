@@ -3,9 +3,12 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.request
 
 
@@ -104,6 +107,74 @@ def ensure_backup_dependencies():
     print("Backup-Abhängigkeiten geprüft: Debian/Ubuntu, bash, rsync, OpenSSH, tar und zstd sind bereit.", flush=True)
 
 
+def ensure_ssh_identity(ssh_dir, client_slug):
+    key_path = ssh_dir / f"raven_backup_{client_slug}"
+    legacy_key_path = ssh_dir / f"pulseone_backup_{client_slug}"
+
+    if key_path.is_symlink():
+        fail(f"unsicherer privater SSH-Schlüssel: {key_path}")
+    if not key_path.exists():
+        if legacy_key_path.is_symlink():
+            fail(f"unsicherer historischer SSH-Schlüssel: {legacy_key_path}")
+        if legacy_key_path.exists():
+            legacy_stat = legacy_key_path.lstat()
+            if not stat.S_ISREG(legacy_stat.st_mode) or legacy_stat.st_uid != 0:
+                fail(f"unsicherer historischer SSH-Schlüssel: {legacy_key_path}")
+            file_descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{key_path.name}.", dir=ssh_dir
+            )
+            try:
+                os.fchmod(file_descriptor, 0o600)
+                with os.fdopen(file_descriptor, "wb") as target, legacy_key_path.open("rb") as source:
+                    shutil.copyfileobj(source, target)
+                os.replace(temporary_name, key_path)
+            finally:
+                try:
+                    pathlib.Path(temporary_name).unlink()
+                except FileNotFoundError:
+                    pass
+            print(
+                f"Historische SSH-Identität {legacy_key_path.name} als {key_path.name} übernommen.",
+                flush=True,
+            )
+        else:
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)],
+                check=True,
+            )
+
+    key_stat = key_path.lstat()
+    if key_path.is_symlink() or not stat.S_ISREG(key_stat.st_mode) or key_stat.st_uid != 0:
+        fail(f"unsicherer privater SSH-Schlüssel: {key_path}")
+    os.chmod(key_path, 0o600)
+    derived = subprocess.run(
+        ["ssh-keygen", "-y", "-f", str(key_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    public_parts = derived.stdout.strip().split()
+    if derived.returncode != 0 or len(public_parts) < 2 or public_parts[0] != "ssh-ed25519":
+        fail(f"privater SSH-Schlüssel ist ungültig oder kein Ed25519-Schlüssel: {key_path}")
+    public_key = " ".join(public_parts[:2])
+
+    public_path = key_path.with_name(key_path.name + ".pub")
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{public_path.name}.", dir=ssh_dir
+    )
+    try:
+        os.fchmod(file_descriptor, 0o644)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            handle.write(public_key + "\n")
+        os.replace(temporary_name, public_path)
+    finally:
+        try:
+            pathlib.Path(temporary_name).unlink()
+        except FileNotFoundError:
+            pass
+    return key_path, public_key
+
+
 if os.geteuid() != 0:
     fail("dieses Programm muss als root ausgefuehrt werden")
 
@@ -113,11 +184,7 @@ if "--dependencies-only" in sys.argv:
 
 ssh_dir = pathlib.Path("/root/.ssh")
 ssh_dir.mkdir(mode=0o700, exist_ok=True)
-key_path = ssh_dir / f"raven_backup_{CLIENT_SLUG}"
-if not key_path.exists():
-    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)], check=True)
-os.chmod(key_path, 0o600)
-public_key = key_path.with_suffix(".pub").read_text(encoding="utf-8").strip()
+key_path, public_key = ensure_ssh_identity(ssh_dir, CLIENT_SLUG)
 
 payload = json.dumps(
     {

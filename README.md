@@ -148,6 +148,8 @@ Danach im Browser `https://<Portal-Hostname>:<HTTPS-Port>` öffnen und mit dem w
 4. Den angezeigten Curl-Befehl einmalig als `root` auf dem Quellserver ausführen.
 5. Agent-Readiness, ersten Portal-Poll und später das Ergebnis des geplanten Backups im Dashboard kontrollieren.
 
+Ein erneutes Deployment ist idempotent: vorhandene RAVEN-Schlüssel werden wiederverwendet. Historische `pulseone_backup_*`-Identitäten werden ohne Schlüsselrotation in den aktuellen `raven_backup_*`-Pfad übernommen, und der öffentliche Schlüssel wird stets neu aus dem privaten Schlüssel abgeleitet.
+
 ### Nicht-interaktive Installation
 
 Für automatisierte Installationen steht `sudo -E bash install.sh --non-interactive` zur Verfügung. Die erforderlichen und optionalen Umgebungsvariablen zeigt `bash install.sh --help` an. Geheimnisse sollten dabei aus einer geschützten Deployment-Umgebung kommen und nicht in Shell-History oder Repository abgelegt werden.
