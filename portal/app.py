@@ -315,6 +315,7 @@ def init_db() -> None:
               schedule_hour INTEGER NOT NULL DEFAULT 2,
               schedule_minute INTEGER NOT NULL DEFAULT 0,
               interval_hours INTEGER NOT NULL DEFAULT 24,
+              start_offset_minutes INTEGER NOT NULL DEFAULT 0,
               mail_on_success INTEGER NOT NULL DEFAULT 1,
               mail_on_failure INTEGER NOT NULL DEFAULT 1,
               mail_on_skipped INTEGER NOT NULL DEFAULT 0,
@@ -496,6 +497,10 @@ def init_db() -> None:
             connection.execute("UPDATE backup_policies SET mariadb_users_enabled=mariadb_enabled")
         migrate_policy_schedule(connection, policy_columns, client_columns, portal_defaults)
         migrate_policy_notifications(connection, policy_columns, client_columns)
+        if "start_offset_minutes" not in policy_columns:
+            connection.execute(
+                "ALTER TABLE backup_policies ADD COLUMN start_offset_minutes INTEGER NOT NULL DEFAULT 0"
+            )
         default_policy = connection.execute(
             "SELECT id,name FROM backup_policies WHERE name IN ('Standard Zstd Archive','Standard Snapshot') "
             "ORDER BY (name='Standard Zstd Archive') DESC LIMIT 1"
@@ -899,6 +904,7 @@ def policy_payload(connection: sqlite3.Connection, policy_id: int | None) -> dic
         "schedule_hour": int(policy["schedule_hour"]),
         "schedule_minute": int(policy["schedule_minute"]),
         "interval_hours": int(policy["interval_hours"]),
+        "start_offset_minutes": int(policy["start_offset_minutes"]),
         "mail_on_success": bool(policy["mail_on_success"]),
         "mail_on_failure": bool(policy["mail_on_failure"]),
         "mail_on_skipped": bool(policy["mail_on_skipped"]),
@@ -906,10 +912,11 @@ def policy_payload(connection: sqlite3.Connection, policy_id: int | None) -> dic
     }
 
 
-def policy_schedule(connection: sqlite3.Connection, policy_id: int | None) -> tuple[int, int, int]:
-    """Return hour, minute and interval of a policy, falling back to the defaults."""
+def policy_schedule(connection: sqlite3.Connection, policy_id: int | None) -> tuple[int, int, int, int]:
+    """Return hour, minute, interval and start offset of a policy with defaults."""
     policy = connection.execute(
-        "SELECT schedule_hour,schedule_minute,interval_hours FROM backup_policies WHERE id=?",
+        "SELECT schedule_hour,schedule_minute,interval_hours,start_offset_minutes "
+        "FROM backup_policies WHERE id=?",
         (policy_id,),
     ).fetchone()
     if not policy:
@@ -918,23 +925,31 @@ def policy_schedule(connection: sqlite3.Connection, policy_id: int | None) -> tu
             int(defaults["default_schedule_hour"]),
             int(defaults["default_schedule_minute"]),
             int(defaults["default_interval_hours"]),
+            0,
         )
-    return int(policy["schedule_hour"]), int(policy["schedule_minute"]), int(policy["interval_hours"])
+    return (
+        int(policy["schedule_hour"]),
+        int(policy["schedule_minute"]),
+        int(policy["interval_hours"]),
+        int(policy["start_offset_minutes"]),
+    )
 
 
 def client_schedule_state(
     connection: sqlite3.Connection, client: sqlite3.Row, now: datetime | None = None
 ) -> dict[str, Any]:
     """Return the live schedule of a client including its next due time."""
-    hour, minute, interval_hours = policy_schedule(connection, client["policy_id"])
+    hour, minute, interval_hours, offset = policy_schedule(connection, client["policy_id"])
     state = backup_schedule.schedule_state(
         now or datetime.now().astimezone(),
         parsed_timestamp(client["last_success_at"]),
         hour,
         minute,
         interval_hours,
+        offset,
+        str(client["slug"]),
     )
-    state["description"] = backup_schedule.describe(hour, minute, interval_hours)
+    state["description"] = backup_schedule.describe(hour, minute, interval_hours, offset)
     state["next_due_display"] = datetime.fromisoformat(state["next_due_at"]).strftime("%d.%m.%Y %H:%M")
     return state
 
@@ -952,16 +967,19 @@ def enqueue_due_schedules() -> None:
             "SELECT * FROM clients WHERE active=1 AND agent_token_hash IS NOT NULL"
         ).fetchall()
         for client in clients:
-            hour, minute, interval_hours = policy_schedule(connection, client["policy_id"])
-            due, current_slot, _following = backup_schedule.is_due(
-                local_now,
-                parsed_timestamp(client["last_success_at"]),
-                hour,
-                minute,
-                interval_hours,
+            hour, minute, interval_hours, offset = policy_schedule(connection, client["policy_id"])
+            plan = backup_schedule.slot_plan(
+                local_now, hour, minute, interval_hours, offset, str(client["slug"])
             )
+            current_slot = plan["window_start"]
+            last_success = parsed_timestamp(client["last_success_at"])
+            due = last_success is None or last_success < current_slot
             schedule_key = f"{client['id']}:{current_slot.isoformat()}"
             if connection.execute("SELECT 1 FROM backup_commands WHERE schedule_key=?", (schedule_key,)).fetchone():
+                continue
+            # With a start offset the slot opens before its planned moment; wait
+            # for that moment so the sources do not all begin at once.
+            if due and local_now < plan["planned_start"]:
                 continue
             if not due:
                 connection.execute(
@@ -1073,8 +1091,8 @@ def checker_age_limits() -> dict[str, float]:
         clients = connection.execute("SELECT username,policy_id FROM clients WHERE active=1").fetchall()
         limits: dict[str, float] = {}
         for client in clients:
-            _hour, _minute, interval_hours = policy_schedule(connection, client["policy_id"])
-            limits[str(client["username"])] = backup_schedule.checker_max_age_hours(interval_hours)
+            _hour, _minute, interval_hours, offset = policy_schedule(connection, client["policy_id"])
+            limits[str(client["username"])] = backup_schedule.checker_max_age_hours(interval_hours, offset)
     return limits
 
 
@@ -1449,7 +1467,7 @@ def application_settings_update(
         raise HTTPException(400, "SSH-Port ist ungültig")
     if not 5 <= deployment_token_minutes <= 1440:
         raise HTTPException(400, "Deployment-Token-Laufzeit muss zwischen 5 und 1440 Minuten liegen")
-    default_schedule_hour, default_schedule_minute, default_interval_hours = validated_schedule(
+    default_schedule_hour, default_schedule_minute, default_interval_hours, _offset = validated_schedule(
         default_schedule_hour, default_schedule_minute, default_interval_hours
     )
     if not 0.25 <= min_remote_free_gib <= 1048576 or not 0.01 <= database_split_gib <= 1048576:
@@ -2076,6 +2094,8 @@ def checker_run_detail(request: Request, run_id: int):
 
 ARCHIVE_SUFFIXES = (".tar.zst", ".tzst", ".tar.gz", ".tgz", ".tar")
 EXPLORER_PAGE_SIZE = 200
+EXPLORER_STAT_CHUNK = 256
+EXPLORER_SORT_KEYS = ("name", "type", "size", "modified", "created")
 EXPLORER_MAX_ARCHIVE_MEMBERS = 50_000
 EXPLORER_ARCHIVE_CACHE_SECONDS = 300
 EXPLORER_ARCHIVE_CACHE_ITEMS = 4
@@ -2310,18 +2330,71 @@ def explorer_index(request: Request):
     return render(request, "explorer_index.html", {"clients": clients})
 
 
+def birth_times(directory_fd: int, names: list[str]) -> dict[str, int]:
+    """Read statx birth times, which os.stat does not expose on Linux.
+
+    The paths are anchored at the already validated directory descriptor so the
+    lookup cannot leave the backup home, and stat never follows a symlink.
+    """
+    result: dict[str, int] = {}
+    for offset in range(0, len(names), EXPLORER_STAT_CHUNK):
+        chunk = names[offset:offset + EXPLORER_STAT_CHUNK]
+        arguments = [f"/proc/self/fd/{directory_fd}/{name}" for name in chunk]
+        try:
+            process = subprocess.run(
+                ["/usr/bin/stat", "--printf", "%W\\n", "--", *arguments],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                pass_fds=(directory_fd,),
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return result
+        for name, line in zip(chunk, process.stdout.splitlines()):
+            try:
+                created = int(line.strip())
+            except ValueError:
+                continue
+            if created > 0:
+                result[name] = created
+    return result
+
+
+def explorer_sort_key(sort: str) -> Any:
+    """Return the sort key for a listing; the default groups directories first."""
+    if sort == "size":
+        return lambda item: (item[1].st_size, item[0].casefold())
+    if sort == "modified":
+        return lambda item: (item[1].st_mtime, item[0].casefold())
+    if sort == "created":
+        return lambda item: (item[2] or item[1].st_mtime, item[0].casefold())
+    if sort == "type":
+        return lambda item: (not statlib.S_ISDIR(item[1].st_mode), Path(item[0]).suffix.casefold(), item[0].casefold())
+    return lambda item: (not statlib.S_ISDIR(item[1].st_mode), item[0].casefold())
+
+
 @app.get("/clients/{client_id}/explorer", response_class=HTMLResponse)
-def explorer_directory(request: Request, client_id: int, path: str = "", page: int = 1):
+def explorer_directory(
+    request: Request,
+    client_id: int,
+    path: str = "",
+    page: int = 1,
+    sort: str = "name",
+    direction: str = "asc",
+):
     require_user(request, admin=True)
     client = explorer_client(client_id)
     directory, relative = safe_explorer_path(client, path)
     if not directory.is_dir():
         raise HTTPException(400, "Pfad ist kein Verzeichnis")
     page = max(1, page)
+    sort = sort if sort in EXPLORER_SORT_KEYS else "name"
+    direction = direction if direction in {"asc", "desc"} else "asc"
     entries: list[dict[str, Any]] = []
     directory_fd = secure_open_directory(client, relative)
     try:
-        children: list[tuple[str, os.stat_result]] = []
+        listing: list[tuple[str, os.stat_result]] = []
         for name in os.listdir(directory_fd):
             if not relative and name.startswith("."):
                 continue
@@ -2329,15 +2402,17 @@ def explorer_directory(request: Request, client_id: int, path: str = "", page: i
                 info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             except OSError:
                 continue
-            children.append((name, info))
-        children.sort(key=lambda item: (not statlib.S_ISDIR(item[1].st_mode), item[0].casefold()))
+            listing.append((name, info))
+        created_times = birth_times(directory_fd, [name for name, _info in listing])
     except OSError as exc:
         raise HTTPException(403, "Verzeichnis kann nicht gelesen werden") from exc
     finally:
         os.close(directory_fd)
+    children = [(name, info, created_times.get(name, 0)) for name, info in listing]
+    children.sort(key=explorer_sort_key(sort), reverse=direction == "desc")
     total = len(children)
     start = (page - 1) * EXPLORER_PAGE_SIZE
-    for name, info in children[start:start + EXPLORER_PAGE_SIZE]:
+    for name, info, created in children[start:start + EXPLORER_PAGE_SIZE]:
         is_link = statlib.S_ISLNK(info.st_mode)
         is_dir = statlib.S_ISDIR(info.st_mode)
         is_file = statlib.S_ISREG(info.st_mode)
@@ -2351,6 +2426,7 @@ def explorer_directory(request: Request, client_id: int, path: str = "", page: i
             "is_archive": is_file and is_archive(Path(name)),
             "size": format_size(info.st_size) if is_file else "–",
             "modified": datetime.fromtimestamp(info.st_mtime).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+            "created": datetime.fromtimestamp(created).astimezone().strftime("%Y-%m-%d %H:%M:%S") if created else "–",
         })
     return render(request, "explorer_directory.html", {
         "client": dict(client),
@@ -2360,6 +2436,8 @@ def explorer_directory(request: Request, client_id: int, path: str = "", page: i
         "page": page,
         "pages": max(1, (total + EXPLORER_PAGE_SIZE - 1) // EXPLORER_PAGE_SIZE),
         "total": total,
+        "sort": sort,
+        "direction": direction,
     })
 
 
@@ -2563,12 +2641,16 @@ def policy_mail_summary(policy: sqlite3.Row) -> str:
     return ", ".join(events) if events else "keine"
 
 
-def validated_schedule(hour: Any, minute: Any, interval_hours: Any) -> tuple[int, int, int]:
+def validated_schedule(
+    hour: Any, minute: Any, interval_hours: Any, offset_minutes: Any = 0
+) -> tuple[int, int, int, int]:
     try:
+        hours = backup_schedule.normalized_interval_hours(interval_hours)
         return (
             backup_schedule.normalized_hour(hour),
             backup_schedule.normalized_minute(minute),
-            backup_schedule.normalized_interval_hours(interval_hours),
+            hours,
+            backup_schedule.normalized_offset_minutes(offset_minutes, hours),
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc) or "Ungueltiger Zeitplan") from exc
@@ -2604,7 +2686,8 @@ def policies_page(request: Request):
             "policies": policies,
             "schedules": {
                 policy["id"]: backup_schedule.describe(
-                    policy["schedule_hour"], policy["schedule_minute"], policy["interval_hours"]
+                    policy["schedule_hour"], policy["schedule_minute"], policy["interval_hours"],
+                    policy["start_offset_minutes"]
                 )
                 for policy in policies
             },
@@ -2624,6 +2707,7 @@ def policy_create(
     schedule_hour: int = Form(...),
     schedule_minute: int = Form(...),
     interval_hours: int = Form(...),
+    start_offset_minutes: int = Form(0),
     mariadb_databases_enabled: str | None = Form(None),
     mariadb_users_enabled: str | None = Form(None),
     mail_on_success: str | None = Form(None),
@@ -2636,8 +2720,8 @@ def policy_create(
     name = name.strip()
     if not (3 <= len(name) <= 80):
         raise HTTPException(400, "Policy-Name muss 3 bis 80 Zeichen lang sein")
-    schedule_hour, schedule_minute, interval_hours = validated_schedule(
-        schedule_hour, schedule_minute, interval_hours
+    schedule_hour, schedule_minute, interval_hours, start_offset_minutes = validated_schedule(
+        schedule_hour, schedule_minute, interval_hours, start_offset_minutes
     )
     try:
         with db() as connection:
@@ -2645,13 +2729,13 @@ def policy_create(
             users_enabled = bool(mariadb_users_enabled)
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
-                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,"
+                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
                 "mail_on_success,mail_on_failure,mail_on_skipped,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
-                 bool(mail_on_success), bool(mail_on_failure), bool(mail_on_skipped),
-                 now_iso(), now_iso()),
+                 start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
+                 bool(mail_on_skipped), now_iso(), now_iso()),
             )
             policy_id = cursor.lastrowid
     except sqlite3.IntegrityError:
@@ -2687,7 +2771,8 @@ def policy_detail(request: Request, policy_id: int):
             "clients": clients,
             "interval_choices": backup_schedule.INTERVAL_CHOICES,
             "schedule_description": backup_schedule.describe(
-                policy["schedule_hour"], policy["schedule_minute"], policy["interval_hours"]
+                policy["schedule_hour"], policy["schedule_minute"], policy["interval_hours"],
+                policy["start_offset_minutes"]
             ),
             "next_slot": following,
             "copy_name": copy_name,
@@ -2705,6 +2790,7 @@ def policy_update(
     schedule_hour: int = Form(...),
     schedule_minute: int = Form(...),
     interval_hours: int = Form(...),
+    start_offset_minutes: int = Form(0),
     mariadb_databases_enabled: str | None = Form(None),
     mariadb_users_enabled: str | None = Form(None),
     mail_on_success: str | None = Form(None),
@@ -2717,8 +2803,8 @@ def policy_update(
     name = name.strip()
     if not (3 <= len(name) <= 80):
         raise HTTPException(400, "Policy-Name muss 3 bis 80 Zeichen lang sein")
-    schedule_hour, schedule_minute, interval_hours = validated_schedule(
-        schedule_hour, schedule_minute, interval_hours
+    schedule_hour, schedule_minute, interval_hours, start_offset_minutes = validated_schedule(
+        schedule_hour, schedule_minute, interval_hours, start_offset_minutes
     )
     try:
         with db() as connection:
@@ -2729,11 +2815,12 @@ def policy_update(
             connection.execute(
                 "UPDATE backup_policies SET name=?,description=?,mariadb_enabled=?,"
                 "mariadb_databases_enabled=?,mariadb_users_enabled=?,schedule_hour=?,schedule_minute=?,"
-                "interval_hours=?,mail_on_success=?,mail_on_failure=?,mail_on_skipped=?,updated_at=? WHERE id=?",
+                "interval_hours=?,start_offset_minutes=?,mail_on_success=?,mail_on_failure=?,"
+                "mail_on_skipped=?,updated_at=? WHERE id=?",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
-                 bool(mail_on_success), bool(mail_on_failure), bool(mail_on_skipped),
-                 now_iso(), policy_id),
+                 start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
+                 bool(mail_on_skipped), now_iso(), policy_id),
             )
             connection.execute(
                 "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE policy_id=?",
@@ -2784,11 +2871,11 @@ def policy_duplicate(
                 raise HTTPException(400, f"Policy-Name muss 3 bis {POLICY_NAME_MAX} Zeichen lang sein")
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
-                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,mail_on_success,"
-                "mail_on_failure,mail_on_skipped,active,created_at,updated_at) "
+                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
+                "mail_on_success,mail_on_failure,mail_on_skipped,active,created_at,updated_at) "
                 "SELECT ?,description,mariadb_enabled,mariadb_databases_enabled,mariadb_users_enabled,"
-                "schedule_hour,schedule_minute,interval_hours,mail_on_success,mail_on_failure,"
-                "mail_on_skipped,active,?,? FROM backup_policies WHERE id=?",
+                "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,mail_on_success,"
+                "mail_on_failure,mail_on_skipped,active,?,? FROM backup_policies WHERE id=?",
                 (new_name, now_iso(), now_iso(), policy_id),
             )
             new_id = int(cursor.lastrowid)

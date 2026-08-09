@@ -91,12 +91,58 @@ class DueTests(unittest.TestCase):
         self.assertEqual(state["last_success_at"], at(12, 2, 30).isoformat())
 
 
+class StartOffsetTests(unittest.TestCase):
+    def test_offset_is_capped_to_a_quarter_of_the_interval(self):
+        self.assertEqual(schedule.normalized_offset_minutes(120, 24), 120)
+        self.assertEqual(schedule.normalized_offset_minutes(60, 1), 15)
+        self.assertEqual(schedule.normalized_offset_minutes(0, 24), 0)
+
+    def test_offset_rejects_impossible_values(self):
+        with self.assertRaises(ValueError):
+            schedule.normalized_offset_minutes(-1, 24)
+        with self.assertRaises(ValueError):
+            schedule.normalized_offset_minutes(121, 24)
+
+    def test_jitter_is_stable_and_inside_the_range(self):
+        slot = at(12, 2)
+        for seed in ("web1", "web2", "db-01"):
+            first = schedule.slot_jitter(seed, slot, 15)
+            self.assertEqual(first, schedule.slot_jitter(seed, slot, 15))
+            self.assertLessEqual(abs(first), 15)
+        # Different servers land on different minutes for the same slot.
+        spread = {schedule.slot_jitter(f"host{index}", slot, 15) for index in range(20)}
+        self.assertGreater(len(spread), 5)
+
+    def test_jitter_changes_between_slots(self):
+        seeds = [schedule.slot_jitter("web1", at(day, 2), 30) for day in range(10, 20)]
+        self.assertGreater(len(set(seeds)), 3)
+
+    def test_window_opens_before_the_desired_time(self):
+        plan = schedule.slot_plan(at(12, 3), 2, 0, 24, 15, "web1")
+        self.assertEqual(plan["window_start"], at(12, 1, 45))
+        self.assertLessEqual(abs((plan["planned_start"] - at(12, 2)).total_seconds()), 15 * 60)
+
+    def test_an_early_run_satisfies_the_slot(self):
+        # Forced at 01:50, ten minutes before the desired time, still counts.
+        due, _window, _following = schedule.is_due(at(12, 6), at(12, 1, 50), 2, 0, 24, 15, "web1")
+        self.assertFalse(due)
+
+    def test_a_run_before_the_window_leaves_the_slot_due(self):
+        due, _window, _following = schedule.is_due(at(12, 6), at(12, 1, 30), 2, 0, 24, 15, "web1")
+        self.assertTrue(due)
+
+    def test_checker_deadline_grows_with_the_offset(self):
+        self.assertEqual(schedule.checker_max_age_hours(24, 0), 36.0)
+        self.assertEqual(schedule.checker_max_age_hours(24, 30), 36.5)
+
+
 class DescriptionTests(unittest.TestCase):
     def test_descriptions(self):
         self.assertEqual(schedule.describe(2, 0, 24), "täglich 02:00")
         self.assertEqual(schedule.describe(2, 30, 6), "alle 6 Stunden ab 02:30")
         self.assertEqual(schedule.describe(3, 0, 48), "alle 2 Tage 03:00")
         self.assertEqual(schedule.describe(3, 0, 168), "wöchentlich 03:00")
+        self.assertEqual(schedule.describe(2, 0, 24, 15), "täglich 02:00 ± 15 min")
 
     def test_checker_age_matches_the_historical_default(self):
         self.assertEqual(schedule.checker_max_age_hours(24), 36.0)

@@ -169,6 +169,16 @@ def measure_volume_bytes(path: Path, timeout_seconds: float) -> int:
         raise RuntimeError(f"ungueltige du-Ausgabe fuer {path}") from exc
 
 
+def run_content_fingerprint(path: Path) -> str | None:
+    """Read the content fingerprint the agent recorded for a finished run."""
+    try:
+        manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    value = manifest.get("run_content_sha256")
+    return value if isinstance(value, str) and len(value) == 64 else None
+
+
 def measure_snapshot_volume_bytes(path: Path, timeout_seconds: float) -> int:
     """Prefer policy-aware protected logical bytes from the signed-off manifest."""
     try:
@@ -556,9 +566,20 @@ def evaluate(cfg: dict[str, Any], previous_state: dict[str, Any] | None = None) 
                         f"; Volumen {format_size(volume_bytes)}, vorher {format_size(previous_volume_bytes)}, "
                         f"Differenz {format_size(volume_delta_bytes, signed=True)}"
                     )
-                    if volume_delta_bytes == 0:
+                    # Identical size says little about identical content, so the
+                    # verdict follows the fingerprints the agent recorded and
+                    # only falls back to the size when a run predates them.
+                    content_hash = run_content_fingerprint(latest_path)
+                    previous_hash = run_content_fingerprint(previous_path)
+                    if content_hash and previous_hash:
+                        if content_hash == previous_hash:
+                            volume_error = True
+                            detail += f"; Inhalt unveraendert (SHA-256 {content_hash[:12]})"
+                        else:
+                            detail += f"; Inhalt geaendert (SHA-256 {content_hash[:12]})"
+                    elif volume_delta_bytes == 0:
                         volume_error = True
-                        detail += "; Backup-Volumen ist unveraendert"
+                        detail += "; Backup-Volumen ist unveraendert, keine Pruefsumme vorhanden"
                 else:
                     detail += f"; Volumen {format_size(volume_bytes)}, kein vorheriges Backup zum Vergleich"
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:

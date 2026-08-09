@@ -11,6 +11,7 @@ import html
 import json
 import logging
 import os
+import re
 import shlex
 import smtplib
 import socket
@@ -41,6 +42,7 @@ CURRENT_RUN_ID: str | None = None
 CURRENT_COMMAND_ID: int | None = None
 ATTEMPT_STARTED_AT: str | None = None
 LOG_UPLOAD_ID = uuid.uuid4().hex
+RUN_CONTENT_HASHES: dict[str, str] = {}
 PORTAL_LOG_HANDLER: "BoundedLogHandler | None" = None
 
 
@@ -690,11 +692,18 @@ def retry(operation_name: str, attempts: int, function: Any) -> Any:
 def stream_compressed(
     cfg: dict[str, Any], producer: list[str], remote_file: str, *, attempts: int
 ) -> None:
+    """Stream one compressed artefact and record the checksum of what landed.
+
+    The target hashes the temporary file before renaming it, so the content
+    fingerprint costs one warm read instead of a second transfer, and a failed
+    checksum keeps the incomplete file from being published.
+    """
     compression_level = int(cfg["backup"].get("zstd_level", 3))
     remote_tmp = remote_file + ".partial"
     remote_write = (
         f"umask 077; mkdir -p {shlex.quote(str(Path(remote_file).parent))}; "
-        f"cat > {shlex.quote(remote_tmp)} && mv -f {shlex.quote(remote_tmp)} {shlex.quote(remote_file)}"
+        f"cat > {shlex.quote(remote_tmp)} && sha256sum -- {shlex.quote(remote_tmp)} && "
+        f"mv -f {shlex.quote(remote_tmp)} {shlex.quote(remote_file)}"
     )
     pipeline = (
         f"{shlex.join(producer)} | /usr/bin/zstd -q -T0 -{compression_level} | "
@@ -702,7 +711,13 @@ def stream_compressed(
     )
 
     def attempt() -> None:
-        proc = subprocess.run(["/usr/bin/bash", "-o", "pipefail", "-c", pipeline], check=False)
+        proc = subprocess.run(
+            ["/usr/bin/bash", "-o", "pipefail", "-c", pipeline],
+            stdout=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            check=False,
+        )
         if proc.returncode != 0:
             ssh(
                 cfg,
@@ -710,6 +725,11 @@ def stream_compressed(
                 timeout=60,
             )
             raise RuntimeError(f"Streaming-Pipeline endete mit Status {proc.returncode}")
+        digest = (proc.stdout or "").split(maxsplit=1)
+        if digest and re.fullmatch(r"[0-9a-f]{64}", digest[0]):
+            RUN_CONTENT_HASHES[remote_file] = digest[0]
+        else:
+            LOG.warning("Keine Pruefsumme fuer %s erhalten", remote_file)
 
     retry(f"Stream {remote_file}", attempts, attempt)
 
@@ -990,6 +1010,31 @@ def notifications_enabled(cfg: dict[str, Any], event: str) -> bool:
     raise ValueError(f"unbekannter Benachrichtigungstyp: {event}")
 
 
+def run_content_hashes(run_dir: str) -> dict[str, str]:
+    """Return the checksum of every artefact of this run, keyed by its run path."""
+    prefix = run_dir.rstrip("/") + "/"
+    return {
+        path[len(prefix):]: digest
+        for path, digest in sorted(RUN_CONTENT_HASHES.items())
+        if path.startswith(prefix)
+    }
+
+
+def run_content_fingerprint(run_dir: str) -> str | None:
+    """Fold the artefact checksums into one value that identifies the content.
+
+    Two runs with the same fingerprint hold byte-identical data, which is a far
+    stronger statement than two runs that merely have the same size.
+    """
+    hashes = run_content_hashes(run_dir)
+    if not hashes:
+        return None
+    digest = hashlib.sha256()
+    for name, value in hashes.items():
+        digest.update(f"{name}\0{value}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
 def notify_skipped(cfg: dict[str, Any], reason: str) -> None:
     """Report a refused backup by mail when the policy asks for it."""
     if not notifications_enabled(cfg, "skipped"):
@@ -1018,6 +1063,7 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
     started = datetime.now().astimezone()
     run_id = started.strftime("%Y%m%d%H%M%S") + f"{started.microsecond // 1000:03d}"
     CURRENT_RUN_ID = run_id
+    RUN_CONTENT_HASHES.clear()
     CURRENT_PHASE = "preflight"
     preflight_result = preflight(cfg)
     remote_home = preflight_result["remote_home"]
@@ -1112,6 +1158,8 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
             int(item["logical_bytes"]) for item in fs_report["sources"].values()
         ) + int(db_report["estimated_bytes"]),
         "previous_successful_backup": previous,
+        "content_hashes": run_content_hashes(run_dir),
+        "run_content_sha256": run_content_fingerprint(run_dir),
         "policy": {
             "id": backup.get("policy_id"),
             "name": backup.get("policy_name", "Legacy"),

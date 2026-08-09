@@ -10,7 +10,8 @@ RAVEN verbindet ein TLS-geschütztes Verwaltungsportal mit einem schlanken Pytho
 - zentral gepflegte Wunschzeit und Backup-Intervall je Policy, die der Agent bei jedem Abruf live übernimmt
 - je Policy einstellbar, bei welchen Backup-Ereignissen eine Mail entsteht, und je Checker-Lauf, bei welchen Prüfergebnissen
 - MariaDB-Dumps einschließlich optionaler Benutzer und Rechte
-- zentrales Scheduling, Laufstatus, Protokolle, Volumenvergleich, Rotation und Speicherwarnungen
+- zentrales Scheduling mit zufälligem Startversatz, Laufstatus, Protokolle, Rotation und Speicherwarnungen
+- Erkennung unveränderter Sicherungen über SHA-256-Prüfsummen statt über die Byte-Größe
 - Backup Explorer für Verzeichnisse, Zstandard-Archive und einzelne Downloads
 - lokale Benutzer und Rollen, kurzlebige Deployment-Tokens sowie isolierte SSH-Zielkonten
 - integriertes SQLite, Plain-SMTP-Benachrichtigungen und Let's Encrypt per Cloudflare- oder manueller DNS-01-Challenge
@@ -209,6 +210,8 @@ Wunschzeit und Intervall gehören zur Backup-Policy und gelten damit für alle S
 
 Die Wunschzeit ist der Anker des Musters. Bei 24 Stunden ist genau ein Backup pro Tag zu dieser Uhrzeit fällig, bei sechs Stunden zusätzlich alle sechs Stunden ab diesem Anker. Erlaubt sind ausschließlich Teiler von 24 Stunden und ganze Vielfache von 24 Stunden bis zu einer Woche; damit bleibt der Anker über Tagesgrenzen hinweg stabil.
 
+Der optionale **Startversatz** verteilt die Server um die Wunschzeit: Bei ± 15 Minuten startet jeder Server zu einem eigenen, aber gleichbleibenden Zeitpunkt zwischen 01:45 und 02:15, sodass nicht alle Quellen gleichzeitig auf den Zielserver schreiben. Der Versatz wird aus Server und Termin abgeleitet und ist deshalb reproduzierbar; er ist auf zwei Stunden und zusätzlich auf ein Viertel des Intervalls begrenzt, damit sich benachbarte Termine nicht überschneiden. Ein Backup, das irgendwo im Fenster gelaufen ist, erfüllt den Termin – ein vorgezogener Force-Lauf wird also nicht wiederholt.
+
 Der zentrale Scheduler queued einen Auftrag, sobald der laufende Termin offen ist, also seit dem Termin noch kein erfolgreiches Backup vorliegt. Der Agent prüft dieselbe Regel anschließend selbst:
 
 - Bei jedem Poll liefert das Portal Wunschzeit, Intervall, den laufenden Termin und den Zeitpunkt des letzten Erfolgs mit. Eine geänderte Policy wirkt deshalb ab dem nächsten Abruf, ohne dass ein Client neu ausgerollt werden muss.
@@ -220,6 +223,12 @@ Auch das Agent-Skript selbst wird über denselben Kanal aktuell gehalten: Der Ag
 Diese Selbstaktualisierung kann erst greifen, wenn auf der Quelle einmal ein Agent mit dieser Fähigkeit liegt. Quellserver, die noch mit einer älteren Fassung onboarded wurden, brauchen daher genau einmal ein erneutes Deployment über den Curl-Befehl; danach kommen weitere Agentversionen automatisch. Bis dahin bleibt der Zeitplan trotzdem wirksam, weil bereits der zentrale Scheduler nur zum fälligen Termin einen Auftrag erzeugt – die zusätzliche Prüfung auf dem Client fehlt lediglich.
 
 Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem Anderthalbfachen des Intervalls, für den Tagesplan also weiterhin nach 36 Stunden. Ein Eintrag unter `max_age_hours_by_user` in `backup-check.toml` bleibt eine bewusste manuelle Ausnahme und hat Vorrang.
+
+## Veränderung erkennen
+
+Der Agent lässt jedes gestreamte Artefakt – Dateisystemarchive, Schemas, Datenbankdumps – auf dem Zielserver prüfsummieren, bevor es unter seinen endgültigen Namen wandert, und legt die Werte samt Gesamtfingerabdruck des Laufs in `manifest.json` ab. Das kostet einen warmen Lesevorgang auf dem Backupserver statt einer zweiten Übertragung, und ein Artefakt ohne gültige Prüfsumme wird gar nicht erst veröffentlicht.
+
+Der Checker vergleicht deshalb zwei aufeinanderfolgende Läufe über ihre Fingerabdrücke und nicht mehr über die Byte-Größe. Gleich groß heißt nicht gleich: erst ein identischer SHA-256 belegt, dass sich am Inhalt nichts geändert hat, und nur dann meldet der Checker `Inhalt unveraendert`. Das Volumen bleibt als Kennzahl erhalten. Für Läufe aus der Zeit vor dieser Änderung gibt es keine Prüfsummen; dort greift weiterhin der Größenvergleich.
 
 ## Server aus dem Portal entfernen
 

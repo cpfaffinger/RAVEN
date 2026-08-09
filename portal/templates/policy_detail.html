@@ -14,6 +14,7 @@
       <div class="form-grid">
         <label>Wunschzeit<small>Anker des Zeitplans, Stunde und Minute</small><span class="time-inputs"><input type="number" name="schedule_hour" min="0" max="23" value="{{ policy.schedule_hour }}" required aria-label="Stunde"><input type="number" name="schedule_minute" min="0" max="59" value="{{ policy.schedule_minute }}" required aria-label="Minute"></span></label>
         <label>Backup-Intervall<small>Abstand zwischen zwei fälligen Backups</small><select name="interval_hours">{% for choice in interval_choices %}<option value="{{ choice }}" {% if choice == policy.interval_hours %}selected{% endif %}>{% if choice < 24 %}alle {{ choice }} Stunden{% elif choice == 24 %}alle 24 Stunden (täglich){% else %}alle {{ choice }} Stunden ({{ (choice / 24)|int }} Tage){% endif %}</option>{% endfor %}</select></label>
+        <label>Zufälliger Startversatz<small>± Minuten um die Wunschzeit, damit nicht alle Server gleichzeitig starten; 0 schaltet ihn ab</small><input type="number" name="start_offset_minutes" min="0" max="120" value="{{ policy.start_offset_minutes }}" required></label>
       </div>
     </div>
     <div class="form-block">

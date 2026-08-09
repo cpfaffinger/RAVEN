@@ -15,6 +15,7 @@
     <div class="form-grid">
       <label>Wunschzeit<small>Anker des Zeitplans, Stunde und Minute</small><span class="time-inputs"><input type="number" name="schedule_hour" min="0" max="23" value="{{ defaults.default_schedule_hour }}" required aria-label="Stunde"><input type="number" name="schedule_minute" min="0" max="59" value="{{ defaults.default_schedule_minute }}" required aria-label="Minute"></span></label>
       <label>Backup-Intervall<small>Abstand zwischen zwei fälligen Backups</small><select name="interval_hours">{% for choice in interval_choices %}<option value="{{ choice }}" {% if choice == defaults.default_interval_hours %}selected{% endif %}>{% if choice < 24 %}alle {{ choice }} Stunden{% elif choice == 24 %}alle 24 Stunden (täglich){% else %}alle {{ choice }} Stunden ({{ (choice / 24)|int }} Tage){% endif %}</option>{% endfor %}</select></label>
+      <label>Zufälliger Startversatz<small>± Minuten um die Wunschzeit; 0 schaltet ihn ab</small><input type="number" name="start_offset_minutes" min="0" max="120" value="0" required></label>
     </div>
     <div class="checks">
       <label><input type="checkbox" name="mariadb_databases_enabled" checked> MariaDB-Datenbanken: Schemas und Daten</label>
