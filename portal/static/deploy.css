@@ -183,3 +183,23 @@
   .danger-zone { align-items: stretch; flex-direction: column; }
   .notification-form { grid-template-columns: 1fr; }
 }
+
+.activity-filter { display: flex; gap: .4rem; flex-wrap: wrap; }
+.activity-filter a { padding: .3rem .65rem; border-radius: 999px; background: #edf2f4; color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 750; }
+.activity-filter a.active { background: var(--accent2); color: #fff; }
+.activity-feed { list-style: none; margin: .5rem 0 0; padding: 0; display: grid; }
+.activity-feed > li { display: grid; grid-template-columns: 92px 96px minmax(0, 1fr); gap: 1rem; align-items: baseline; padding: .7rem 0; border-top: 1px solid var(--line); }
+.activity-feed > li.empty { display: block; text-align: center; color: var(--muted); padding: 2rem 0; }
+.activity-feed time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+.activity-kind { justify-self: start; padding: .15rem .5rem; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .06em; background: #edf2f4; color: #526772; }
+.activity-kind.kind-backup { background: #e2f4ed; color: var(--good); }
+.activity-kind.kind-checker { background: #e7eef8; color: #315d91; }
+.activity-text { min-width: 0; overflow-wrap: anywhere; }
+.activity-text a { color: var(--accent2); font-weight: 750; text-decoration: none; }
+.activity-text small { display: block; color: var(--muted); margin-top: .15rem; }
+.activity-feed > li.activity-failure strong { color: var(--bad); }
+.activity-feed > li.activity-skipped strong, .activity-feed > li.activity-warning strong { color: var(--warn); }
+
+@media (max-width: 700px) {
+  .activity-feed > li { grid-template-columns: 1fr; gap: .25rem; }
+}

@@ -15,6 +15,7 @@ RAVEN verbindet ein TLS-geschütztes Verwaltungsportal mit einem schlanken Pytho
 - Backup Explorer für Verzeichnisse, Zstandard-Archive und einzelne Downloads
 - lokale Benutzer und Rollen, kurzlebige Deployment-Tokens sowie isolierte SSH-Zielkonten
 - integriertes SQLite, Plain-SMTP-Benachrichtigungen und Let's Encrypt per Cloudflare- oder manueller DNS-01-Challenge
+- Aktivitätsfeed auf der Übersicht über eingegangene Backups, Checkerläufe und Verwaltungsaktionen
 - Liveness- und Readiness-Endpunkte für externes Monitoring
 
 Dieses Repository enthält drei zusammengehörige Komponenten:

@@ -1875,6 +1875,155 @@ def logout(request: Request, csrf_token: str = Form(...)):
     return response
 
 
+ACTIVITY_LIMIT = 30
+ACTIVITY_KINDS = ("all", "backup", "checker", "admin")
+AUDIT_LABELS = {
+    "backup.trigger": "Backup manuell angefordert",
+    "backup.download": "Datei aus Backup geladen",
+    "backup.archive_download": "Datei aus Archiv geladen",
+    "certificate.request": "Zertifikat angefordert",
+    "checker.settings": "Checker-Einstellungen geändert",
+    "checker.trigger": "Checkerlauf gestartet",
+    "client.agent_config": "Agent-Konfiguration geändert",
+    "client.create": "Server angelegt",
+    "client.delete": "Server entfernt",
+    "client.onboard": "Server onboarded",
+    "client.policy_assign": "Policy zugewiesen",
+    "clients.import": "Bestandskonten importiert",
+    "cloudflare.credentials": "Cloudflare-Zugang geändert",
+    "cloudflare.test": "Cloudflare-Zugang getestet",
+    "deployment_token.create": "Deployment-Token erzeugt",
+    "deployment_token.revoke": "Deployment-Token widerrufen",
+    "deployment_token.view": "Deployment-Befehl angezeigt",
+    "login.failed": "Fehlgeschlagene Anmeldung",
+    "login.rate_limited": "Anmeldung gesperrt",
+    "login.success": "Anmeldung",
+    "logout": "Abmeldung",
+    "policy.create": "Policy angelegt",
+    "policy.delete": "Policy gelöscht",
+    "policy.duplicate": "Policy dupliziert",
+    "policy.path_add": "Pfadregel ergänzt",
+    "policy.path_delete": "Pfadregel entfernt",
+    "policy.update": "Policy geändert",
+    "portal.settings": "Portal-Konfiguration geändert",
+    "smtp.settings": "SMTP-Einstellungen geändert",
+    "user.create": "Benutzer angelegt",
+    "user.notifications": "Mailoptionen geändert",
+    "user.password_reset": "Passwort zurückgesetzt",
+    "user.toggle": "Benutzer aktiviert oder deaktiviert",
+}
+FAILING_AUDIT_ACTIONS = {"login.failed", "login.rate_limited"}
+
+
+def backup_event_entry(row: sqlite3.Row) -> dict[str, Any]:
+    """Describe one agent event for the activity feed."""
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    facts: list[str] = []
+    if row["event"] == "success":
+        volume = payload.get("logical_run_bytes")
+        if isinstance(volume, int):
+            facts.append(format_size(volume))
+        duration = payload.get("duration_seconds")
+        if isinstance(duration, (int, float)):
+            facts.append(f"{duration:.0f} s")
+        databases = (payload.get("mariadb") or {}).get("database_count")
+        if isinstance(databases, int) and databases:
+            facts.append(f"{databases} Datenbanken")
+    elif row["event"] == "failure":
+        error = str(payload.get("error") or payload.get("error_type") or "").strip()
+        phase = str(payload.get("phase") or "").strip()
+        facts = [item for item in (f"Phase {phase}" if phase else "", error) if item]
+    title = {
+        "success": "Backup eingegangen",
+        "failure": "Backup fehlgeschlagen",
+        "started": "Backup gestartet",
+    }[str(row["event"])]
+    return {
+        "at": parsed_timestamp(row["created_at"]),
+        "kind": "backup",
+        "status": {"success": "success", "failure": "failure"}.get(str(row["event"]), "running"),
+        "title": title,
+        "subject": str(row["slug"]),
+        "detail": " · ".join(facts),
+        "link": f"/clients/{int(row['client_id'])}",
+    }
+
+
+def activity_feed(kind: str = "all", limit: int = ACTIVITY_LIMIT) -> list[dict[str, Any]]:
+    """Merge agent events, refusals, checker runs and audit entries into one stream."""
+    entries: list[dict[str, Any]] = []
+    with db() as connection:
+        if kind in {"all", "backup"}:
+            for row in connection.execute(
+                "SELECT e.created_at,e.event,e.payload,c.slug,c.id AS client_id FROM status_events e "
+                "JOIN clients c ON c.id=e.client_id WHERE e.event IN ('started','success','failure') "
+                "ORDER BY e.id DESC LIMIT ?",
+                (limit,),
+            ):
+                entries.append(backup_event_entry(row))
+            for row in connection.execute(
+                "SELECT b.finished_at,b.message,c.slug,c.id AS client_id FROM backup_commands b "
+                "JOIN clients c ON c.id=b.client_id WHERE b.status='skipped' "
+                "ORDER BY b.id DESC LIMIT ?",
+                (limit,),
+            ):
+                entries.append({
+                    "at": parsed_timestamp(row["finished_at"]),
+                    "kind": "backup",
+                    "status": "skipped",
+                    "title": "Backup abgelehnt",
+                    "subject": str(row["slug"]),
+                    "detail": str(row["message"] or "Intervall noch nicht abgelaufen"),
+                    "link": f"/clients/{int(row['client_id'])}",
+                })
+        if kind in {"all", "checker"}:
+            # The checker reports every hour with the same line; in the merged
+            # view a few recent runs are enough to keep backups visible.
+            checker_limit = limit if kind == "checker" else 3
+            for row in connection.execute(
+                "SELECT id,mode,status,summary,finished_at FROM checker_runs "
+                "WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT ?",
+                (checker_limit,),
+            ):
+                entries.append({
+                    "at": parsed_timestamp(row["finished_at"]),
+                    "kind": "checker",
+                    "status": "success" if row["status"] == "success" else
+                              "failure" if row["status"] == "error" else "warning",
+                    "title": {
+                        "normal": "Checkerlauf", "force": "Force-Report", "dry_run": "Dry-Run",
+                        "smtp_check": "SMTP-Prüfung", "smtp_test": "Testmail",
+                    }.get(str(row["mode"]), "Checkerlauf"),
+                    "subject": "Checker",
+                    "detail": str(row["summary"] or ""),
+                    "link": f"/checker/runs/{int(row['id'])}",
+                })
+        if kind in {"all", "admin"}:
+            for row in connection.execute(
+                "SELECT a.created_at,a.action,a.target,a.details,u.username FROM audit_log a "
+                "LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT ?",
+                (limit,),
+            ):
+                action = str(row["action"])
+                entries.append({
+                    "at": parsed_timestamp(row["created_at"]),
+                    "kind": "admin",
+                    "status": "failure" if action in FAILING_AUDIT_ACTIONS else "info",
+                    "title": AUDIT_LABELS.get(action, action),
+                    "subject": str(row["target"] or row["username"] or "Portal"),
+                    "detail": str(row["username"] or "System"),
+                    "link": None,
+                })
+    entries = [entry for entry in entries if entry["at"]]
+    entries.sort(key=lambda entry: entry["at"], reverse=True)
+    for entry in entries[:limit]:
+        entry["when"] = entry["at"].strftime("%d.%m. %H:%M")
+    return entries[:limit]
+
+
 def system_account_exists(username: str) -> bool:
     try:
         pwd.getpwnam(str(username))
@@ -1915,9 +2064,12 @@ def agent_state(client: dict[str, Any], current_script_digest: str) -> dict[str,
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, sort: str = "server", direction: str = "asc"):
+def dashboard(
+    request: Request, sort: str = "server", direction: str = "asc", activity: str = "all"
+):
     require_user(request)
     sort = sort if sort in {"server", "volume", "agent"} else "server"
+    activity = activity if activity in ACTIVITY_KINDS else "all"
     direction = direction if direction in {"asc", "desc"} else "asc"
     checks = checker_results()
     with db() as connection:
@@ -1989,6 +2141,8 @@ def dashboard(request: Request, sort: str = "server", direction: str = "asc"):
             "orphaned": orphaned,
             "sort": sort,
             "direction": direction,
+            "activity": activity,
+            "activity_entries": activity_feed(activity),
             "message": request.query_params.get("message", ""),
         },
     )
