@@ -228,7 +228,9 @@ Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem And
 
 Der Agent lässt jedes gestreamte Artefakt – Dateisystemarchive, Schemas, Datenbankdumps – auf dem Zielserver prüfsummieren, bevor es unter seinen endgültigen Namen wandert, und legt die Werte samt Gesamtfingerabdruck des Laufs in `manifest.json` ab. Das kostet einen warmen Lesevorgang auf dem Backupserver statt einer zweiten Übertragung, und ein Artefakt ohne gültige Prüfsumme wird gar nicht erst veröffentlicht.
 
-Der Checker vergleicht deshalb zwei aufeinanderfolgende Läufe über ihre Fingerabdrücke und nicht mehr über die Byte-Größe. Gleich groß heißt nicht gleich: erst ein identischer SHA-256 belegt, dass sich am Inhalt nichts geändert hat, und nur dann meldet der Checker `Inhalt unveraendert`. Das Volumen bleibt als Kennzahl erhalten. Für Läufe aus der Zeit vor dieser Änderung gibt es keine Prüfsummen; dort greift weiterhin der Größenvergleich.
+Der Checker vergleicht deshalb zwei aufeinanderfolgende Läufe über ihre Fingerabdrücke und nicht mehr über die Byte-Größe. Gleich groß heißt nicht gleich: erst ein identischer SHA-256 belegt, dass sich am Inhalt nichts geändert hat. Das Volumen bleibt als Kennzahl erhalten.
+
+Ein unveränderter Inhalt ist dabei kein Fehler. Die verglichene Größe stammt aus dem Quellvolumen, und das ist auf einem ruhigen Server zwischen zwei Läufen regelmäßig identisch – früher hat genau das reihenweise falsche Alarme erzeugt. Wer den Hinweis als Alarm behandeln möchte, aktiviert unter **Checker** die Option **Unveränderten Inhalt als Fehler werten**; sie greift ausschließlich bei zwei vorhandenen, identischen Prüfsummen. Läufe ohne Prüfsumme und Spiegelverzeichnisse lösen nie einen Alarm aus, sondern werden nur als solche ausgewiesen.
 
 ## Server aus dem Portal entfernen
 
@@ -256,6 +258,7 @@ Der zentrale Checker richtet sich nach den Einstellungen unter **Checker**:
 | Wiederherstellung | Entwarnung, sobald ein gemeldetes Backup wieder aktuell ist | aktiv |
 | Fehlerfreier Lauf | Vollständiger Bericht auch ohne Befund | aus |
 | Erinnerungsabstand | Abstand, in dem ein weiterhin bestehendes Problem erneut gemeldet wird | 24 Stunden |
+| Unveränderter Inhalt | Wertet zwei Läufe mit identischer Prüfsumme als Problem | aus |
 
 Ein Force-Report versendet die Ergebnismail unabhängig von diesen Schaltern, ein Dry-Run versendet nie. Das Portal übergibt die Werte bei jedem Lauf; die Angaben in `backup-check.toml` greifen nur beim direkten Aufruf des Skripts.
 

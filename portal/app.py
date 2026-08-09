@@ -364,6 +364,7 @@ def init_db() -> None:
               mail_on_problem INTEGER NOT NULL DEFAULT 1,
               mail_on_recovery INTEGER NOT NULL DEFAULT 1,
               mail_on_clean_run INTEGER NOT NULL DEFAULT 0,
+              alarm_on_unchanged INTEGER NOT NULL DEFAULT 0,
               reminder_hours INTEGER NOT NULL DEFAULT 24,
               updated_by INTEGER REFERENCES users(id), updated_at TEXT NOT NULL
             );
@@ -580,6 +581,7 @@ def init_db() -> None:
             "mail_on_problem": "INTEGER NOT NULL DEFAULT 1",
             "mail_on_recovery": "INTEGER NOT NULL DEFAULT 1",
             "mail_on_clean_run": "INTEGER NOT NULL DEFAULT 0",
+            "alarm_on_unchanged": "INTEGER NOT NULL DEFAULT 0",
             "reminder_hours": "INTEGER NOT NULL DEFAULT 24",
         }
         for column, definition in checker_alert_defaults.items():
@@ -1106,6 +1108,7 @@ def checker_alert_settings() -> dict[str, Any]:
         "mail_on_problem": bool(row["mail_on_problem"]),
         "mail_on_recovery": bool(row["mail_on_recovery"]),
         "mail_on_clean_run": bool(row["mail_on_clean_run"]),
+        "alarm_on_unchanged": bool(row["alarm_on_unchanged"]),
         "reminder_hours": int(row["reminder_hours"]),
     }
 
@@ -2026,6 +2029,7 @@ def checker_settings_update(
     mail_on_problem: str | None = Form(None),
     mail_on_recovery: str | None = Form(None),
     mail_on_clean_run: str | None = Form(None),
+    alarm_on_unchanged: str | None = Form(None),
     csrf_token: str = Form(...),
 ):
     user = require_user(request, admin=True)
@@ -2037,18 +2041,20 @@ def checker_settings_update(
     with db() as connection:
         connection.execute(
             "UPDATE checker_settings SET enabled=?,interval_minutes=?,next_run_at=?,mail_on_problem=?,"
-            "mail_on_recovery=?,mail_on_clean_run=?,reminder_hours=?,updated_by=?,updated_at=? WHERE id=1",
+            "mail_on_recovery=?,mail_on_clean_run=?,alarm_on_unchanged=?,reminder_hours=?,"
+            "updated_by=?,updated_at=? WHERE id=1",
             (
                 bool(enabled), interval_minutes, checker_next_time(interval_minutes),
                 bool(mail_on_problem), bool(mail_on_recovery), bool(mail_on_clean_run),
-                reminder_hours, user["id"], now_iso(),
+                bool(alarm_on_unchanged), reminder_hours, user["id"], now_iso(),
             ),
         )
     CHECKER_WAKEUP.set()
     audit(
         request, "checker.settings", "portal-checker",
         f"enabled={bool(enabled)}, interval={interval_minutes}, problem={bool(mail_on_problem)}, "
-        f"recovery={bool(mail_on_recovery)}, clean={bool(mail_on_clean_run)}, reminder={reminder_hours}",
+        f"recovery={bool(mail_on_recovery)}, clean={bool(mail_on_clean_run)}, "
+        f"unchanged_alarm={bool(alarm_on_unchanged)}, reminder={reminder_hours}",
         user_id=user["id"],
     )
     return RedirectResponse("/checker", status_code=303)

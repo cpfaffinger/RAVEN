@@ -870,6 +870,7 @@ reminder_hours = 24
 mail_on_problem = true
 mail_on_recovery = true
 mail_on_clean_run = false
+alarm_on_unchanged = false
 
 [storage]
 enabled = true

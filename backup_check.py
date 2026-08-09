@@ -406,6 +406,9 @@ def evaluate(cfg: dict[str, Any], previous_state: dict[str, Any] | None = None) 
     marker_name = str(mon.get("ok_marker_name", ".backup-ok"))
     marker_users = list(mon.get("require_ok_file_for_users", []))
     incomplete_grace_hours = float(mon.get("incomplete_grace_hours", 6))
+    # A run that repeats the previous content is normal on a quiet server, so it
+    # only raises an alarm when the operator explicitly asks for it.
+    alarm_on_unchanged = bool(cfg.get("alerts", {}).get("alarm_on_unchanged", False))
     previous_users = (previous_state or {}).get("users", {})
     age_overrides = mon.get("max_age_hours_by_user", {})
     now = local_now()
@@ -566,20 +569,20 @@ def evaluate(cfg: dict[str, Any], previous_state: dict[str, Any] | None = None) 
                         f"; Volumen {format_size(volume_bytes)}, vorher {format_size(previous_volume_bytes)}, "
                         f"Differenz {format_size(volume_delta_bytes, signed=True)}"
                     )
-                    # Identical size says little about identical content, so the
-                    # verdict follows the fingerprints the agent recorded and
-                    # only falls back to the size when a run predates them.
+                    # Equal size means little: it is measured from the source
+                    # volume, which stays identical on any quiet server. Only
+                    # matching fingerprints prove that the content repeated.
                     content_hash = run_content_fingerprint(latest_path)
                     previous_hash = run_content_fingerprint(previous_path)
                     if content_hash and previous_hash:
                         if content_hash == previous_hash:
-                            volume_error = True
                             detail += f"; Inhalt unveraendert (SHA-256 {content_hash[:12]})"
+                            if alarm_on_unchanged:
+                                volume_error = True
                         else:
                             detail += f"; Inhalt geaendert (SHA-256 {content_hash[:12]})"
                     elif volume_delta_bytes == 0:
-                        volume_error = True
-                        detail += "; Backup-Volumen ist unveraendert, keine Pruefsumme vorhanden"
+                        detail += "; gleiche Quellgroesse, Pruefsumme folgt mit dem naechsten Lauf"
                 else:
                     detail += f"; Volumen {format_size(volume_bytes)}, kein vorheriges Backup zum Vergleich"
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
@@ -606,8 +609,7 @@ def evaluate(cfg: dict[str, Any], previous_state: dict[str, Any] | None = None) 
                         f"Differenz {format_size(int(volume_delta_bytes), signed=True)}"
                     )
                     if volume_delta_bytes == 0:
-                        volume_error = True
-                        detail += "; Backup-Volumen ist unveraendert"
+                        detail += "; gleiche Spiegelgroesse, fuer Spiegel gibt es keine Laufpruefsumme"
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 volume_error = True
                 detail += f"; Volumenmessung fehlgeschlagen: {exc}"

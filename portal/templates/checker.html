@@ -27,6 +27,7 @@
         <label><input type="checkbox" name="mail_on_problem" {% if settings.mail_on_problem %}checked{% endif %}> Mail bei Problemen <small>Alarm, sobald eine Prüfung von OK abweicht, danach im Erinnerungsabstand erneut</small></label>
         <label><input type="checkbox" name="mail_on_recovery" {% if settings.mail_on_recovery %}checked{% endif %}> Mail bei Wiederherstellung <small>Entwarnung, sobald ein zuvor gemeldetes Backup wieder aktuell ist</small></label>
         <label><input type="checkbox" name="mail_on_clean_run" {% if settings.mail_on_clean_run %}checked{% endif %}> Mail bei fehlerfreiem Lauf <small>Vollständiger Bericht nach jedem Lauf ohne Befund; ohne diese Option bleibt es still</small></label>
+        <label><input type="checkbox" name="alarm_on_unchanged" {% if settings.alarm_on_unchanged %}checked{% endif %}> Unveränderten Inhalt als Fehler werten <small>Zwei Läufe mit identischer Prüfsumme gelten dann als Problem. Auf ruhigen Servern ist unveränderter Inhalt normal, deshalb ist das standardmäßig aus.</small></label>
         <label><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}> Automatische Prüfung aktiv <small>Ohne Automatik bleiben nur manuell gestartete Läufe</small></label>
       </div>
     </div>
