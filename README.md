@@ -230,6 +230,8 @@ Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem And
 
 Der Zielserver hält die Sicherungen so lange vor, wie es seine Rotation zulässt. Für eine längere Historie und eine zweite Kopie repliziert RAVEN den gesamten Bestand aus `/home` per rsync auf beliebig viele entfernte Spiegel. Verwaltet werden sie admin-only unter **Spiegelserver**.
 
+Repliziert werden ausschließlich die Zielkonten des Backupsystems, also die Ordner unterhalb des Home-Roots, die mit dem konfigurierten Benutzerpräfix beginnen. Alles andere im Home-Root – Freigaben, Handablagen, fremde Benutzerordner – bleibt außen vor. Hat ein früherer Lauf solche Ordner bereits kopiert, bleiben sie auf dem Spiegel unverändert liegen und werden im Laufprotokoll benannt; RAVEN löscht auf einem fremden Server nichts von sich aus.
+
 Je Ziel werden Hostname, SSH-Port, Benutzer, Zielpfad und ein privater OpenSSH-Schlüssel hinterlegt. Der Schlüssel liegt mit dem Portal-Master-Secret verschlüsselt in SQLite, wird nach dem Speichern nie wieder angezeigt und existiert während eines Laufs nur als root-only Datei unterhalb von `/run`, die danach wieder verschwindet.
 
 Vor dem ersten Lauf muss der **Hostschlüssel** des Ziels gepinnt werden; der Knopf holt ihn per `ssh-keyscan` und zeigt den Fingerabdruck an. Repliziert wird ausschließlich mit `StrictHostKeyChecking=yes` gegen genau diesen Eintrag, und eine geänderte Adresse verwirft ihn wieder. Ohne Schlüsselpaar läuft kein Ziel an.

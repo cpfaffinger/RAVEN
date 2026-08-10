@@ -4,7 +4,7 @@
 <div class="page-head"><div><p class="eyebrow">Spiegelserver</p><h1>{{ target.name }}</h1><p class="muted">{{ target.username }}@{{ target.host }}:{{ target.ssh_port }} → <code>{{ target.remote_path }}</code></p></div><a class="secondary button" href="/mirrors">Alle Spiegel</a></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 <section class="panel control-panel">
-  <div><p class="eyebrow">Replikation</p><h2>Bestand jetzt spiegeln</h2><p class="muted">Repliziert <code>{{ source_path }}</code> vollständig auf dieses Ziel. Es läuft immer nur eine Replikation gleichzeitig.</p></div>
+  <div><p class="eyebrow">Replikation</p><h2>Bestand jetzt spiegeln</h2><p class="muted">Repliziert alle Backup-Zielkonten unterhalb von <code>{{ source_path }}</code> auf dieses Ziel. Es läuft immer nur eine Replikation gleichzeitig.</p></div>
   <div class="control-facts"><span>Status<strong>{{ (target.last_status or 'kein Lauf')|upper }}</strong></span><span>Nächster Lauf<strong>{{ target.next_run_display if target.enabled else 'PAUSIERT' }}</strong></span><span>Freier Speicher<strong>{{ target.free }}</strong></span></div>
   <form method="post" action="/mirrors/{{ target.id }}/run"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="primary" {% if busy or not target.ready %}disabled{% endif %}>Replikation starten</button></form>
 </section>

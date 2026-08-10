@@ -1351,11 +1351,12 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
             sections.append(f"Zielspeicher: {format_size(free)} frei von {format_size(total)}")
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             sections.append(f"Zielspeicher konnte nicht gelesen werden: {exc}")
+        account_prefix = str(application_settings()["username_prefix"])
         command = mirror_module.rsync_command(
             source_path=str(HOME_ROOT), username=str(target["username"]), host=str(target["host"]),
             remote_path=str(target["remote_path"]), options=options,
             key_path=str(key_path), known_hosts_path=str(known_hosts_path),
-            port=int(target["ssh_port"]),
+            port=int(target["ssh_port"]), account_prefix=account_prefix,
         )
         LOG.info("Spiegelreplikation %s gestartet: %s", target["name"], target["host"])
         process = subprocess.run(
@@ -1384,6 +1385,27 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
                 f"Aufbewahrung {int(target['retention_days'])} Tage: {len(removed)} Laeufe entfernt\n"
                 + "\n".join(removed[:200])
             )
+        if acceptable:
+            # Entries outside the backup accounts are not replicated. Anything an
+            # earlier run copied there stays untouched, so name it instead of
+            # deleting data on a remote host on our own initiative.
+            foreign = subprocess.run(
+                mirror_module.ssh_command(
+                    username=str(target["username"]), host=str(target["host"]),
+                    remote_command=mirror_module.foreign_entries_command(
+                        str(target["remote_path"]), account_prefix
+                    ),
+                    key_path=str(key_path), known_hosts_path=str(known_hosts_path),
+                    port=int(target["ssh_port"]),
+                ),
+                capture_output=True, text=True, errors="replace", timeout=120, check=False,
+            )
+            names = [line for line in foreign.stdout.splitlines() if line.strip()]
+            if names:
+                sections.append(
+                    f"Nicht repliziert und weiterhin auf dem Ziel vorhanden ({len(names)}): "
+                    + ", ".join(names)
+                )
         status = "success" if acceptable else "failure"
         summary = (
             f"Replikation nach {target['host']} abgeschlossen"

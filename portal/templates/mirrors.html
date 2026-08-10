@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Spiegelserver · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Replikation</p><h1>Spiegelserver</h1><p class="muted">Der vollständige Backupbestand aus <code>{{ source_path }}</code> wird per rsync auf entfernte Ziele repliziert. Jedes Ziel hat sein eigenes Intervall, seine eigenen rsync-Optionen und damit seine eigene Historie.</p></div></div>
+<div class="page-head"><div><p class="eyebrow">Replikation</p><h1>Spiegelserver</h1><p class="muted">Die Backup-Zielkonten unterhalb von <code>{{ source_path }}</code> werden per rsync auf entfernte Ziele repliziert; fremde Ordner im Home-Root bleiben außen vor. Jedes Ziel hat sein eigenes Intervall, seine eigenen rsync-Optionen und damit seine eigene Historie.</p></div></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 <section class="panel">
   <div class="panel-head"><div><p class="eyebrow">Neues Ziel</p><h2>Spiegelserver hinzufügen</h2></div><span class="muted">Der private Schlüssel wird verschlüsselt in SQLite abgelegt</span></div>

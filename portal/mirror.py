@@ -111,6 +111,22 @@ def ssh_transport(key_path: str, known_hosts_path: str, port: int) -> list[str]:
     ]
 
 
+ACCOUNT_PREFIX_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,15}$")
+
+
+def scope_filters(account_prefix: str) -> list[str]:
+    """Restrict the transfer to the target accounts of the backup system.
+
+    The home root also holds directories that have nothing to do with RAVEN.
+    Both rules are anchored to the transfer root and carry no ``**``, so they
+    decide only which top level entries take part and leave every rule about
+    the content inside an account to the operator.
+    """
+    if not ACCOUNT_PREFIX_PATTERN.fullmatch(account_prefix):
+        raise ValueError("Benutzerpraefix ist fuer die Auswahl der Ordner ungueltig")
+    return [f"--filter=+ /{account_prefix}*/", "--filter=- /*"]
+
+
 def remote_destination(username: str, host: str, remote_path: str) -> str:
     return f"{username}@{host}:{remote_path.rstrip('/')}/"
 
@@ -125,11 +141,17 @@ def rsync_command(
     key_path: str,
     known_hosts_path: str,
     port: int,
+    account_prefix: str,
 ) -> list[str]:
-    """Build the replication command for one mirror target."""
+    """Build the replication command for one mirror target.
+
+    The scope rules come after the operator's options so their own rules keep
+    precedence for anything inside an account.
+    """
     return [
         "/usr/bin/rsync",
         *options,
+        *scope_filters(account_prefix),
         "-e", shlex.join(ssh_transport(key_path, known_hosts_path, port)),
         source_path.rstrip("/") + "/",
         remote_destination(username, host, remote_path),
@@ -167,6 +189,19 @@ def parse_transferred_bytes(output: str) -> int | None:
         return int(match.group(1).replace(".", "").replace(",", ""))
     except ValueError:
         return None
+
+
+def foreign_entries_command(remote_path: str, account_prefix: str) -> str:
+    """Return a remote command listing entries that are not backup accounts."""
+    if not ACCOUNT_PREFIX_PATTERN.fullmatch(account_prefix):
+        raise ValueError("Benutzerpraefix ist ungueltig")
+    if not ABSOLUTE_PATH_PATTERN.fullmatch(remote_path):
+        raise ValueError("Zielpfad ist nicht sicher genug")
+    base = shlex.quote(remote_path.rstrip("/"))
+    return (
+        f"find {base} -mindepth 1 -maxdepth 1 "
+        f"! -name {shlex.quote(account_prefix + '*')} -printf '%f\n' 2>/dev/null | head -50"
+    )
 
 
 def retention_command(remote_path: str, retention_days: int) -> str:

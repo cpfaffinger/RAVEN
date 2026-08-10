@@ -59,12 +59,47 @@ class RsyncOptionTests(unittest.TestCase):
             mirror.validated_rsync_options("--exclude=$(reboot)")
 
 
+class ScopeTests(unittest.TestCase):
+    def test_only_the_backup_accounts_take_part(self):
+        self.assertEqual(
+            mirror.scope_filters("backup_"), ["--filter=+ /backup_*/", "--filter=- /*"]
+        )
+        self.assertEqual(
+            mirror.scope_filters("raven_"), ["--filter=+ /raven_*/", "--filter=- /*"]
+        )
+
+    def test_scope_rules_leave_the_content_of_an_account_alone(self):
+        # No rule carries "**", so operator rules still decide inside an account.
+        for rule in mirror.scope_filters("backup_"):
+            self.assertNotIn("**", rule)
+
+    def test_scope_rejects_an_unusable_prefix(self):
+        for prefix in ("Backup_", "back up", "*", ""):
+            with self.assertRaises(ValueError, msg=prefix):
+                mirror.scope_filters(prefix)
+
+    def test_scope_rules_follow_the_operator_options(self):
+        command = mirror.rsync_command(
+            source_path="/home", username="m", host="h", remote_path="/srv/x",
+            options=["-a", "--exclude=*.tmp"], key_path="/k", known_hosts_path="/kh",
+            port=22, account_prefix="backup_",
+        )
+        self.assertLess(command.index("--exclude=*.tmp"), command.index("--filter=+ /backup_*/"))
+
+    def test_foreign_entries_are_only_listed(self):
+        command = mirror.foreign_entries_command("/srv/raven", "backup_")
+        self.assertIn("-mindepth 1 -maxdepth 1", command)
+        self.assertIn("! -name 'backup_*'", command)
+        self.assertNotIn("rm", command)
+
+
 class CommandTests(unittest.TestCase):
     def test_rsync_command_pins_the_transport(self):
         command = mirror.rsync_command(
             source_path="/home", username="mirror", host="mirror.example.com",
             remote_path="/srv/raven", options=["-a", "--delete"],
             key_path="/run/key", known_hosts_path="/run/known", port=2222,
+            account_prefix="backup_",
         )
         self.assertEqual(command[0], "/usr/bin/rsync")
         self.assertEqual(command[-2], "/home/")
