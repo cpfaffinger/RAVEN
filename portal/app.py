@@ -1249,6 +1249,23 @@ def mirror_credentials(target: sqlite3.Row) -> tuple[Path, Path]:
     return paths[0], paths[1]
 
 
+def discard_stale_mirror_credentials() -> None:
+    """Remove key material a killed replication could not clean up itself.
+
+    A hard stop kills the worker mid-transfer, so its finally block never runs
+    and the private key stays behind. Files of the current process are left
+    alone; they belong to a replication that is still going.
+    """
+    for path in Path("/run").glob("backup-portal-mirror-*"):
+        if path.name.endswith(f"-{os.getpid()}") or f"-{os.getpid()}-" in path.name:
+            continue
+        try:
+            path.unlink()
+            LOG.info("Zurueckgebliebene Spiegel-Zugangsdatei entfernt: %s", path.name)
+        except OSError:
+            LOG.warning("Zurueckgebliebene Spiegel-Zugangsdatei blieb liegen: %s", path.name)
+
+
 def mirror_disk_usage(target: sqlite3.Row, key_path: Path, known_hosts_path: Path) -> tuple[int, int]:
     process = subprocess.run(
         mirror_module.ssh_command(
@@ -1579,6 +1596,7 @@ def startup() -> None:
     CHECKER_THREAD.start()
     MIRROR_STOP.clear()
     MIRROR_WAKEUP.clear()
+    discard_stale_mirror_credentials()
     MIRROR_THREAD = threading.Thread(target=mirror_loop, name="mirror-worker", daemon=True)
     MIRROR_THREAD.start()
 
