@@ -41,6 +41,7 @@
       <label>Replikationsintervall in Stunden<input type="number" name="interval_hours" min="1" max="168" value="{{ target.interval_hours }}" required></label>
       <label>Aufbewahrung in Tagen<small>0 entfernt nichts; sonst werden Laufordner auf dem Spiegel gelöscht, die älter sind</small><input type="number" name="retention_days" min="0" max="3650" value="{{ target.retention_days }}" required></label>
     </div>
+    <div class="onboarding-hint"><strong>Zwei Betriebsarten</strong><span><strong>Exakte Kopie:</strong> <code>-a --delete --stats</code>. Der Spiegel folgt dem Zielserver eins zu eins. Was die Rotation dort entfernt, verschwindet auch hier – die Historie ist damit genauso lang wie auf dem Zielserver und der Spiegel läuft nie voll.</span><span><strong>Längere Historie:</strong> <code>-a --delete --stats --filter='P backup_*/[0-9]*'</code>. Die Schutzregel bewahrt Laufordner, die der Zielserver bereits rotiert hat; <code>current</code>-Spiegel bleiben trotzdem exakt. Dann muss die Aufbewahrung unten gesetzt sein, sonst wächst der Spiegel unbegrenzt.</span></div>
     <label>Neuer privater SSH-Schlüssel<small>Leer lassen, um den gespeicherten Schlüssel beizubehalten.</small><textarea name="private_key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
     <div class="checks"><label><input type="checkbox" name="enabled" {% if target.enabled %}checked{% endif %}> Automatische Replikation aktiv</label></div>
     <div class="actions"><button class="primary">Ziel speichern</button></div>

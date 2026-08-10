@@ -30,6 +30,25 @@ class RsyncOptionTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=raw):
                 mirror.validated_rsync_options(raw)
 
+    def test_accepts_protect_rules_that_keep_history(self):
+        self.assertEqual(
+            mirror.validated_rsync_options(mirror.HISTORY_RSYNC_OPTIONS),
+            ["-a", "--delete", "--stats", "--filter=P backup_*/[0-9]*"],
+        )
+        self.assertEqual(
+            mirror.validated_rsync_options("--filter='- *.tmp'"), ["--filter=- *.tmp"]
+        )
+
+    def test_rejects_filter_rules_that_read_files(self):
+        for raw in (
+            "--filter='merge /etc/shadow'",
+            "--filter='. /etc/passwd'",
+            "--filter='dir-merge .rules'",
+            "--filter='P $(reboot)'",
+        ):
+            with self.assertRaises(ValueError, msg=raw):
+                mirror.validated_rsync_options(raw)
+
     def test_rejects_unknown_flags_and_bare_paths(self):
         for raw in ("-a --make-it-so", "-a /etc/passwd", "-aQ"):
             with self.assertRaises(ValueError, msg=raw):

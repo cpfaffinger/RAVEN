@@ -19,6 +19,11 @@ from typing import Any
 
 
 DEFAULT_RSYNC_OPTIONS = "-a --delete --stats"
+
+# Keeps run directories that the source has already rotated away, so the mirror
+# can hold a longer history than the target server itself. Pair it with a
+# retention on the mirror, otherwise the copy grows without a bound.
+HISTORY_RSYNC_OPTIONS = "-a --delete --stats --filter='P backup_*/[0-9]*'"
 MAX_RSYNC_OPTIONS = 40
 
 # Short flags that only affect the transfer itself.
@@ -33,6 +38,12 @@ SAFE_LONG_FLAGS = {
     "--ignore-existing", "--size-only", "--omit-dir-times", "--links", "--perms",
     "--times", "--group", "--owner", "--devices", "--specials", "--recursive",
 }
+
+# Filter rules that only decide which files take part. "merge" and "dir-merge"
+# would read a rule file from disk, so they stay out.
+SAFE_FILTER_RULE = re.compile(
+    r"^--filter=(P|protect|H|hide|S|show|R|risk|\+|include|-|exclude) [^\s`$;&|<>()]{1,200}$"
+)
 
 SAFE_VALUE_FLAGS = (
     re.compile(r"^--bwlimit=\d{1,9}[KMG]?$"),
@@ -75,6 +86,8 @@ def validated_rsync_options(raw: str) -> list[str]:
         if token in SAFE_LONG_FLAGS:
             continue
         if any(pattern.fullmatch(token) for pattern in SAFE_VALUE_FLAGS):
+            continue
+        if SAFE_FILTER_RULE.fullmatch(token):
             continue
         if not token.startswith("--") and len(token) > 1 and set(token[1:]) <= SAFE_SHORT_FLAGS:
             continue

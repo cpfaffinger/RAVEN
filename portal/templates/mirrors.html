@@ -17,12 +17,13 @@
     </div>
     <div class="form-grid">
       <label>Zielpfad<small>Absoluter Pfad auf dem Spiegel, in den repliziert wird</small><input name="remote_path" required placeholder="/srv/raven-mirror"></label>
-      <label>rsync-Optionen<small>Nur Übertragungsoptionen; Quelle, Ziel und Transport setzt RAVEN selbst</small><input name="rsync_options" value="{{ default_options }}" maxlength="500" required></label>
+      <label>rsync-Optionen<small>Nur Übertragungsoptionen; Quelle, Ziel und Transport setzt RAVEN selbst</small><input name="rsync_options" value="{{ default_options }}" maxlength="500" required list="rsync-presets"><datalist id="rsync-presets"><option value="{{ default_options }}">Exakte Kopie</option><option value="{{ history_options }}">Längere Historie</option></datalist></label>
     </div>
     <div class="form-grid">
       <label>Replikationsintervall<small>Stunden zwischen zwei Läufen dieses Ziels</small><input type="number" name="interval_hours" min="1" max="168" value="24" required></label>
       <label>Aufbewahrung in Tagen<small>0 lässt alles liegen; sonst werden ältere Laufordner auf dem Spiegel entfernt</small><input type="number" name="retention_days" min="0" max="3650" value="0" required></label>
     </div>
+    <div class="onboarding-hint"><strong>Zwei Betriebsarten</strong><span><strong>Exakte Kopie:</strong> <code>-a --delete --stats</code>. Der Spiegel folgt dem Zielserver eins zu eins. Was die Rotation dort entfernt, verschwindet auch hier – die Historie ist damit genauso lang wie auf dem Zielserver und der Spiegel läuft nie voll.</span><span><strong>Längere Historie:</strong> <code>-a --delete --stats --filter='P backup_*/[0-9]*'</code>. Die Schutzregel bewahrt Laufordner, die der Zielserver bereits rotiert hat; <code>current</code>-Spiegel bleiben trotzdem exakt. Dann muss die Aufbewahrung unten gesetzt sein, sonst wächst der Spiegel unbegrenzt.</span></div>
     <label>Privater SSH-Schlüssel<small>OpenSSH-Format. Er wird verschlüsselt gespeichert und danach nie wieder angezeigt.</small><textarea name="private_key" rows="6" required placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
     <div class="checks"><label><input type="checkbox" name="enabled" checked> Automatische Replikation aktiv</label></div>
     <div class="actions"><button class="primary">Spiegelziel anlegen</button></div>

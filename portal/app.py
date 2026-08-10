@@ -2595,6 +2595,7 @@ def mirrors_page(request: Request):
         "targets": [mirror_target_view(target) for target in targets],
         "runs": runs,
         "default_options": mirror_module.DEFAULT_RSYNC_OPTIONS,
+        "history_options": mirror_module.HISTORY_RSYNC_OPTIONS,
         "source_path": str(HOME_ROOT),
         "message": request.query_params.get("message", ""),
     })

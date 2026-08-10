@@ -244,7 +244,22 @@ Jedes Ziel hat sein eigenes **Intervall**, seine eigenen **rsync-Optionen** und 
 
 Die rsync-Optionen sind operatorseitig, laufen aber gegen eine Freigabeliste: erlaubt sind Optionen, die beschreiben *was* übertragen wird, niemals solche, die bestimmen *wie* die Gegenseite erreicht wird. `-e`, `--rsh`, `--rsync-path`, `--files-from` und Verwandte werden abgelehnt, weil sie fremde Programme starten könnten; Quelle, Ziel und SSH-Transport setzt RAVEN selbst.
 
-Die Aufbewahrung greift ausschließlich auf Verzeichnisse, die exakt wie ein Backup-Lauf eines Zielkontos aussehen (`<ziel>/backup_*/<lauf-id>`). Alles andere auf dem Spiegel bleibt unberührt, auch `current`-Spiegel und fremde Verzeichnisse. Mit `--delete` folgt der Spiegel dem Zielserver; ohne `--delete` wachsen die Stände an, und erst die Aufbewahrung begrenzt sie.
+Die Aufbewahrung greift ausschließlich auf Verzeichnisse, die exakt wie ein Backup-Lauf eines Zielkontos aussehen (`<ziel>/backup_*/<lauf-id>`). Alles andere auf dem Spiegel bleibt unberührt, auch `current`-Spiegel und fremde Verzeichnisse.
+
+### Exakte Kopie oder längere Historie
+
+Beide Betriebsarten sind sinnvoll, sie schließen sich aber gegenseitig aus – die rsync-Optionen entscheiden:
+
+```text
+Exakte Kopie      -a --delete --stats
+Längere Historie  -a --delete --stats --filter='P backup_*/[0-9]*'
+```
+
+Mit dem schlichten `--delete` ist der Spiegel eine exakte Kopie: Er läuft nie voll, weil er alles verwirft, was der Zielserver verwirft – aber genau deshalb ist seine Historie **exakt so lang wie die des Zielservers** (`snapshot_retention_days`, standardmäßig sieben Tage). Zwei Spiegel mit acht und dreißig Tagen lassen sich so nicht bauen.
+
+Die Schutzregel `P backup_*/[0-9]*` nimmt genau die Laufordner von der Löschung aus. Der Zielserver rotiert weiter nach sieben Tagen, auf dem Spiegel bleiben die älteren Stände liegen, und `current`-Spiegel folgen der Quelle trotzdem exakt, weil sie nicht geschützt sind und dort gelöschte Dateien weiterhin entfernt werden. Begrenzt wird der Spiegel dann durch seine eigene **Aufbewahrung** – acht Tage beim einen Ziel, dreißig beim anderen. Ohne gesetzte Aufbewahrung wüchse er unbegrenzt.
+
+Filterregeln sind auf die auswertenden Typen begrenzt (`P`/`protect`, `+`/`include`, `-`/`exclude`, `H`, `S`, `R`); `merge` und `dir-merge` sind ausgeschlossen, weil sie eine Regeldatei von der Platte lesen würden.
 
 Ein eigener Portal-Worker führt immer nur eine Replikation gleichzeitig aus. Zu Beginn jedes Laufs wird der freie Speicher des Ziels über `df` ermittelt und in der Oberfläche ausgewiesen. Status, Dauer, übertragenes Volumen und die vollständige rsync-Ausgabe stehen je Lauf zur Verfügung, ein Lauf lässt sich jederzeit manuell auslösen, und die Ergebnisse erscheinen zusätzlich im Aktivitätsfeed der Übersicht. rsync-Status 24 gilt als Erfolg: er bedeutet nur, dass während des Laufs eine Datei verschwunden ist, was auf einem aktiven Backupbestand regelmäßig vorkommt.
 
