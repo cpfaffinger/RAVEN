@@ -204,7 +204,14 @@
   .activity-feed > li { grid-template-columns: 1fr; gap: .25rem; }
 }
 
-.mirror-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; }
+.mirror-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 1rem; }
+.mirror-card .panel-head { align-items: flex-start; gap: 1rem; }
+.mirror-card .panel-head > div { min-width: 0; }
+.mirror-card .eyebrow { text-transform: none; letter-spacing: .02em; font-size: 12px; overflow-wrap: anywhere; }
+.mirror-card .status { flex: 0 0 auto; white-space: nowrap; }
+.host-key { margin-top: 1rem; }
+.host-key summary { cursor: pointer; font-weight: 750; color: var(--accent2); }
+.host-key .agent-log { margin-top: .6rem; }
 .mirror-card { margin: 0; }
 .mirror-card h2 { margin: .15rem 0 0; }
 .mirror-card h2 a { color: inherit; text-decoration: none; }
@@ -216,3 +223,6 @@
 .activity-kind.kind-mirror { background: #efe7f8; color: #5b3d8f; }
 
 .live-output { max-height: 60vh; overflow: auto; }
+.interval-input { display: flex; gap: .4rem; align-items: center; }
+.interval-input input { min-width: 0; flex: 1 1 6rem; }
+.interval-input select { flex: 0 0 8rem; }

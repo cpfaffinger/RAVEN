@@ -144,6 +144,38 @@ class RetentionTests(unittest.TestCase):
             mirror.retention_command("/srv/../etc; rm -rf /", 8)
 
 
+class IntervalTests(unittest.TestCase):
+    def test_days_and_hours_describe_the_same_interval(self):
+        self.assertEqual(mirror.interval_from_unit(3, "days"), 72)
+        self.assertEqual(mirror.interval_from_unit(72, "hours"), 72)
+        self.assertEqual(mirror.interval_fields(72), (3, "days"))
+        self.assertEqual(mirror.interval_fields(6), (6, "hours"))
+
+    def test_thirty_days_is_the_ceiling(self):
+        self.assertEqual(mirror.interval_from_unit(30, "days"), 720)
+        self.assertEqual(mirror.interval_from_unit(720, "hours"), 720)
+        for value, unit in ((31, "days"), (721, "hours"), (0, "days"), (0, "hours")):
+            with self.assertRaises(ValueError, msg=f"{value} {unit}"):
+                mirror.interval_from_unit(value, unit)
+
+    def test_unknown_unit_is_refused(self):
+        with self.assertRaises(ValueError):
+            mirror.interval_from_unit(5, "weeks")
+
+    def test_descriptions_read_naturally(self):
+        self.assertEqual(mirror.describe_interval(24), "täglich")
+        self.assertEqual(mirror.describe_interval(1), "stündlich")
+        self.assertEqual(mirror.describe_interval(72), "alle 3 Tage")
+        self.assertEqual(mirror.describe_interval(6), "alle 6 Stunden")
+
+    def test_a_month_long_interval_passes_validation(self):
+        target = mirror.validated_target(
+            host="mirror.example.com", username="mirror", remote_path="/srv/raven",
+            ssh_port=22, interval_hours=720, retention_days=0, rsync_options="-a --delete",
+        )
+        self.assertEqual(target["interval_hours"], 720)
+
+
 class ValidationTests(unittest.TestCase):
     def base(self, **overrides):
         values = {

@@ -113,6 +113,38 @@ def ssh_transport(key_path: str, known_hosts_path: str, port: int) -> list[str]:
 
 ACCOUNT_PREFIX_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,15}$")
 
+MAX_INTERVAL_HOURS = 720
+INTERVAL_UNITS = ("hours", "days")
+
+
+def interval_from_unit(value: Any, unit: str) -> int:
+    """Turn the operator's number and unit into hours."""
+    if unit not in INTERVAL_UNITS:
+        raise ValueError("Einheit des Intervalls ist unbekannt")
+    amount = int(value)
+    hours = amount * 24 if unit == "days" else amount
+    if not 1 <= hours <= MAX_INTERVAL_HOURS:
+        limit = MAX_INTERVAL_HOURS // 24 if unit == "days" else MAX_INTERVAL_HOURS
+        raise ValueError(
+            f"Intervall muss zwischen 1 und {limit} {'Tagen' if unit == 'days' else 'Stunden'} liegen"
+        )
+    return hours
+
+
+def interval_fields(hours: int) -> tuple[int, str]:
+    """Return the number and unit that show an interval most naturally."""
+    hours = int(hours)
+    if hours >= 24 and hours % 24 == 0:
+        return hours // 24, "days"
+    return hours, "hours"
+
+
+def describe_interval(hours: int) -> str:
+    amount, unit = interval_fields(hours)
+    if unit == "days":
+        return "täglich" if amount == 1 else f"alle {amount} Tage"
+    return "stündlich" if amount == 1 else f"alle {amount} Stunden"
+
 
 def scope_filters(account_prefix: str) -> list[str]:
     """Restrict the transfer to the target accounts of the backup system.
@@ -240,8 +272,10 @@ def validated_target(
     if not 1 <= port <= 65535:
         raise ValueError("SSH-Port ist ungueltig")
     interval = int(interval_hours)
-    if not 1 <= interval <= 168:
-        raise ValueError("Replikationsintervall muss zwischen 1 und 168 Stunden liegen")
+    if not 1 <= interval <= MAX_INTERVAL_HOURS:
+        raise ValueError(
+            f"Replikationsintervall muss zwischen 1 und {MAX_INTERVAL_HOURS} Stunden liegen"
+        )
     retention = int(retention_days)
     if not 0 <= retention <= 3650:
         raise ValueError("Aufbewahrung muss zwischen 0 und 3650 Tagen liegen")

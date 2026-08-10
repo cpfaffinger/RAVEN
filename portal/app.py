@@ -96,6 +96,7 @@ app = FastAPI(title="RAVEN", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[PORTAL_FQDN])
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+templates.env.filters["size"] = lambda value: format_size(value) if value is not None else "–"
 
 
 def now_ts() -> int:
@@ -2666,6 +2667,10 @@ def mirror_target_view(target: sqlite3.Row) -> dict[str, Any]:
     free = int(target["free_bytes"] or 0)
     item["free_percent"] = round(free / total * 100, 1) if total else None
     item["used_percent"] = round((total - free) / total * 100, 1) if total else 0
+    item["interval_text"] = mirror_module.describe_interval(int(target["interval_hours"]))
+    item["interval_value"], item["interval_unit"] = mirror_module.interval_fields(
+        int(target["interval_hours"])
+    )
     item["next_run_display"] = (
         parsed_timestamp(target["next_run_at"]).astimezone().strftime("%d.%m.%Y %H:%M")
         if target["next_run_at"] and target["enabled"] else "–"
@@ -2710,6 +2715,7 @@ def mirrors_page(request: Request):
         "targets": [mirror_target_view(target) for target in targets],
         "runs": runs,
         "default_options": mirror_module.DEFAULT_RSYNC_OPTIONS,
+        "max_interval_days": mirror_module.MAX_INTERVAL_HOURS // 24,
         "history_options": mirror_module.HISTORY_RSYNC_OPTIONS,
         "source_path": str(HOME_ROOT),
         "message": request.query_params.get("message", ""),
@@ -2726,7 +2732,8 @@ def mirror_create(
     remote_path: str = Form(...),
     private_key: str = Form(...),
     rsync_options: str = Form(mirror_module.DEFAULT_RSYNC_OPTIONS),
-    interval_hours: int = Form(24),
+    interval_value: int = Form(24),
+    interval_unit: str = Form("hours"),
     retention_days: int = Form(0),
     enabled: str | None = Form(None),
     csrf_token: str = Form(...),
@@ -2739,7 +2746,8 @@ def mirror_create(
     try:
         values = mirror_module.validated_target(
             host=host, username=username, remote_path=remote_path, ssh_port=ssh_port,
-            interval_hours=interval_hours, retention_days=retention_days, rsync_options=rsync_options,
+            interval_hours=mirror_module.interval_from_unit(interval_value, interval_unit),
+            retention_days=retention_days, rsync_options=rsync_options,
         )
         key = mirror_module.normalized_private_key(private_key)
     except ValueError as exc:
@@ -2784,6 +2792,7 @@ def mirror_detail(request: Request, target_id: int):
         ).fetchone()
     return render(request, "mirror_detail.html", {
         "target": mirror_target_view(target),
+        "max_interval_days": mirror_module.MAX_INTERVAL_HOURS // 24,
         "runs": runs,
         "busy": bool(active),
         "source_path": str(HOME_ROOT),
@@ -2802,7 +2811,8 @@ def mirror_update(
     remote_path: str = Form(...),
     private_key: str = Form(""),
     rsync_options: str = Form(mirror_module.DEFAULT_RSYNC_OPTIONS),
-    interval_hours: int = Form(24),
+    interval_value: int = Form(24),
+    interval_unit: str = Form("hours"),
     retention_days: int = Form(0),
     enabled: str | None = Form(None),
     csrf_token: str = Form(...),
@@ -2815,7 +2825,8 @@ def mirror_update(
     try:
         values = mirror_module.validated_target(
             host=host, username=username, remote_path=remote_path, ssh_port=ssh_port,
-            interval_hours=interval_hours, retention_days=retention_days, rsync_options=rsync_options,
+            interval_hours=mirror_module.interval_from_unit(interval_value, interval_unit),
+            retention_days=retention_days, rsync_options=rsync_options,
         )
         key = mirror_module.normalized_private_key(private_key) if private_key.strip() else ""
     except ValueError as exc:
