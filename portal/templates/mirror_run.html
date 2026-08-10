@@ -2,6 +2,10 @@
 {% block title %}Replikationslauf #{{ run.id }} · RAVEN{% endblock %}
 {% block content %}
 <div class="page-head"><div><p class="eyebrow">Replikationslauf #{{ run.id }}</p><h1>{{ run.target_name }}</h1><p class="muted">{{ run.host }} · {{ run.requested_at }} · {{ run.requested_by_name or 'Zeitplan' }}</p></div><a class="secondary button" href="/mirrors/{{ run.target_id }}">Zum Spiegelziel</a></div>
-<section class="panel"><div class="panel-head"><h2>Lauf</h2><span class="status {{ run.status }}">{{ run.status|upper }}</span></div><dl><dt>Modus</dt><dd>{{ 'Manuell' if run.mode == 'manual' else 'Zeitplan' }}</dd><dt>Gestartet</dt><dd>{{ run.started_at or '–' }}</dd><dt>Beendet</dt><dd>{{ run.finished_at or '–' }}</dd><dt>Exit-Code</dt><dd>{{ run.exit_code if run.exit_code is not none else '–' }}</dd><dt>Übertragen</dt><dd>{{ volume }}</dd><dt>Zusammenfassung</dt><dd>{{ run.summary or '–' }}</dd></dl></section>
-<section class="panel"><div class="panel-head"><h2>Ausgabe</h2><span class="muted">Maximal 250 KB je Lauf</span></div><pre class="agent-log">{{ run.output or 'Noch keine Ausgabe.' }}</pre></section>
+<section class="panel"><div class="panel-head"><h2>Lauf</h2><span class="status live-status {{ run.status }}">{{ run.status|upper }}</span></div><dl><dt>Modus</dt><dd>{{ 'Manuell' if run.mode == 'manual' else 'Zeitplan' }}</dd><dt>Gestartet</dt><dd>{{ run.started_at or '–' }}</dd><dt>Beendet</dt><dd>{{ run.finished_at or 'läuft noch' }}</dd><dt>Exit-Code</dt><dd>{{ run.exit_code if run.exit_code is not none else '–' }}</dd><dt>Übertragen</dt><dd>{{ volume }}</dd><dt>Zusammenfassung</dt><dd>{{ run.summary or '–' }}</dd></dl></section>
+<section class="panel" data-live-source="/mirrors/runs/{{ run.id }}/output">
+  <div class="panel-head"><div><p class="eyebrow">rsync</p><h2>Ausgabe</h2></div><span class="muted live-note">{% if run.status in ['queued', 'running'] %}Live · aktualisiert alle 3 Sekunden{% else %}Abgeschlossener Lauf · maximal 250 KB je Lauf{% endif %}</span></div>
+  <pre class="agent-log live-output">{{ run.output or 'Noch keine Ausgabe.' }}</pre>
+  {% if run.status in ['queued', 'running'] %}<p class="muted">Zeile für Zeile sichtbar wird der Fortschritt nur, wenn die rsync-Optionen des Ziels <code>-v</code> oder <code>--progress</code> enthalten; ohne sie meldet rsync erst am Ende.</p>{% endif %}
+</section>
 {% endblock %}

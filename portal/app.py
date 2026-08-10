@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 from collections import OrderedDict
 import copy
 import hashlib
@@ -82,6 +83,8 @@ MIRROR_STOP = threading.Event()
 MIRROR_WAKEUP = threading.Event()
 MIRROR_THREAD: threading.Thread | None = None
 MIRROR_TIMEOUT_SECONDS = 21600
+MIRROR_OUTPUT_LIMIT = 250_000
+MIRROR_PUBLISH_SECONDS = 2.0
 AGENT_SCRIPT_LOCK = threading.Lock()
 AGENT_SCRIPT_CACHE: tuple[tuple[int, int], str, bytes] | None = None
 ARCHIVE_SCAN_LOCK = threading.BoundedSemaphore(2)
@@ -1338,6 +1341,18 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
     sections: list[str] = []
     key_path: Path | None = None
     known_hosts_path: Path | None = None
+
+    def publish_progress(parts: list[str]) -> None:
+        """Make the output of the running replication visible right away."""
+        try:
+            with db() as connection:
+                connection.execute(
+                    "UPDATE mirror_runs SET output=? WHERE id=?",
+                    (chr(10).join(part for part in parts if part)[-MIRROR_OUTPUT_LIMIT:], run_id),
+                )
+        except sqlite3.Error:
+            LOG.debug("Zwischenstand des Spiegellaufs konnte nicht gespeichert werden", exc_info=True)
+
     try:
         options = mirror_module.validated_rsync_options(str(target["rsync_options"]))
         key_path, known_hosts_path = mirror_credentials(target)
@@ -1359,15 +1374,18 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
             port=int(target["ssh_port"]), account_prefix=account_prefix,
         )
         LOG.info("Spiegelreplikation %s gestartet: %s", target["name"], target["host"])
-        process = subprocess.run(
-            command, capture_output=True, text=True, errors="replace",
-            timeout=MIRROR_TIMEOUT_SECONDS, check=False,
+        publish_progress(sections + ["rsync laeuft ..."])
+        return_code, transfer_output = run_streaming(
+            command,
+            MIRROR_TIMEOUT_SECONDS,
+            lambda text: publish_progress(sections + [text]),
         )
-        transferred = mirror_module.parse_transferred_bytes(process.stdout)
-        sections.append((process.stdout + "\n" + process.stderr).strip())
+        transferred = mirror_module.parse_transferred_bytes(transfer_output)
+        sections.append(transfer_output.strip())
+        publish_progress(sections)
         # rsync reports 24 when a file vanished mid-transfer; a live backup store
         # does that regularly and the replication itself is still complete.
-        acceptable = process.returncode in {0, 24}
+        acceptable = return_code in {0, 24}
         if acceptable and int(target["retention_days"]) > 0:
             prune = subprocess.run(
                 mirror_module.ssh_command(
@@ -1385,6 +1403,7 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
                 f"Aufbewahrung {int(target['retention_days'])} Tage: {len(removed)} Laeufe entfernt\n"
                 + "\n".join(removed[:200])
             )
+            publish_progress(sections)
         if acceptable:
             # Entries outside the backup accounts are not replicated. Anything an
             # earlier run copied there stays untouched, so name it instead of
@@ -1411,18 +1430,19 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
             f"Replikation nach {target['host']} abgeschlossen"
             + (f", {format_size(transferred)} uebertragen" if transferred is not None else "")
             if acceptable
-            else f"rsync endete mit Status {process.returncode}"
+            else f"rsync endete mit Status {return_code}"
         )
         finish_mirror_run(
-            run_id, target_id, status, exit_code=process.returncode,
+            run_id, target_id, status, exit_code=return_code,
             summary=summary, output="\n\n".join(sections), transferred=transferred,
         )
         LOG.info("Spiegelreplikation %s beendet: %s", target["name"], summary)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.output.decode("utf-8", "replace") if isinstance(exc.output, bytes) else (exc.output or "")
         finish_mirror_run(
             run_id, target_id, "failure", exit_code=124,
             summary=f"Zeitlimit von {MIRROR_TIMEOUT_SECONDS} Sekunden ueberschritten",
-            output="\n\n".join(sections),
+            output="\n\n".join([*sections, partial]),
         )
         LOG.error("Spiegelreplikation %s hat das Zeitlimit ueberschritten", target["name"])
     except Exception as exc:
@@ -1438,6 +1458,61 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
                     path.unlink()
                 except FileNotFoundError:
                     pass
+
+
+def run_streaming(command: list[str], timeout: int, publish: Any) -> tuple[int, str]:
+    """Run a command and hand its output on while it is still running.
+
+    Output is read in chunks rather than by line so a carriage return progress
+    display arrives as well, and only the tail is kept so a chatty transfer
+    cannot grow without a bound.
+    """
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+    timed_out = threading.Event()
+    timer = threading.Timer(timeout, lambda: (timed_out.set(), process.kill()))
+    timer.start()
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    lines: list[str] = []
+    pending = ""
+    size = 0
+    truncated = False
+    published_at = 0.0
+
+    def collected() -> str:
+        body = "\n".join(lines)
+        return "[... aeltere Zeilen wegen Groessenlimit entfernt ...]" + "\n" + body if truncated else body
+
+    try:
+        assert process.stdout is not None
+        while True:
+            data = os.read(process.stdout.fileno(), 65536)
+            if not data:
+                break
+            pending += decoder.decode(data)
+            *complete, pending = re.split(r"\r\n|\r|\n", pending)
+            for line in complete:
+                lines.append(line)
+                size += len(line) + 1
+            while size > MIRROR_OUTPUT_LIMIT and lines:
+                size -= len(lines.pop(0)) + 1
+                truncated = True
+            now = time.monotonic()
+            if complete and now - published_at >= MIRROR_PUBLISH_SECONDS:
+                published_at = now
+                publish(collected())
+        if pending.strip():
+            lines.append(pending)
+        return_code = process.wait(timeout=60)
+    finally:
+        timer.cancel()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process.stdout:
+            process.stdout.close()
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(command, timeout, output=collected().encode("utf-8", "replace"))
+    return return_code, collected()
 
 
 def mirror_loop() -> None:
@@ -2828,6 +2903,27 @@ def mirror_delete(request: Request, target_id: int, csrf_token: str = Form(...))
         f"/mirrors?message={quote('Spiegelziel entfernt; die replizierten Daten bleiben auf dem Zielserver')}",
         status_code=303,
     )
+
+
+@app.get("/mirrors/runs/{run_id}/output")
+def mirror_run_output(request: Request, run_id: int):
+    """Serve the current output so a running replication can be followed live."""
+    require_user(request, admin=True)
+    with db() as connection:
+        run = connection.execute(
+            "SELECT status,output,summary,finished_at,transferred_bytes FROM mirror_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+    if not run:
+        raise HTTPException(404)
+    return JSONResponse({
+        "status": str(run["status"]),
+        "running": str(run["status"]) in {"queued", "running"},
+        "output": str(run["output"] or ""),
+        "summary": str(run["summary"] or ""),
+        "finished_at": run["finished_at"],
+        "volume": format_size(run["transferred_bytes"]),
+    })
 
 
 @app.get("/mirrors/runs/{run_id}", response_class=HTMLResponse)

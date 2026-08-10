@@ -5,7 +5,7 @@
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 <section class="panel control-panel">
   <div><p class="eyebrow">Replikation</p><h2>Bestand jetzt spiegeln</h2><p class="muted">Repliziert alle Backup-Zielkonten unterhalb von <code>{{ source_path }}</code> auf dieses Ziel. Es läuft immer nur eine Replikation gleichzeitig.</p></div>
-  <div class="control-facts"><span>Status<strong>{{ (target.last_status or 'kein Lauf')|upper }}</strong></span><span>Nächster Lauf<strong>{{ target.next_run_display if target.enabled else 'PAUSIERT' }}</strong></span><span>Freier Speicher<strong>{{ target.free }}</strong></span></div>
+  <div class="control-facts"><span>Status<strong>{{ (target.last_status or 'kein Lauf')|upper }}</strong></span>{% if busy and runs %}<span>Aktiver Lauf<strong><a href="/mirrors/runs/{{ runs[0].id }}">#{{ runs[0].id }} verfolgen</a></strong></span>{% endif %}<span>Nächster Lauf<strong>{{ target.next_run_display if target.enabled else 'PAUSIERT' }}</strong></span><span>Freier Speicher<strong>{{ target.free }}</strong></span></div>
   <form method="post" action="/mirrors/{{ target.id }}/run"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="primary" {% if busy or not target.ready %}disabled{% endif %}>Replikation starten</button></form>
 </section>
 <section class="detail-grid">

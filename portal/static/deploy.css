@@ -214,3 +214,5 @@
 .space-bar > span { display: block; height: 100%; background: var(--accent2); }
 .status.running, .status.queued { background: #e7eef8; color: #315d91; }
 .activity-kind.kind-mirror { background: #efe7f8; color: #5b3d8f; }
+
+.live-output { max-height: 60vh; overflow: auto; }
