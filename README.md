@@ -246,18 +246,19 @@ Die rsync-Optionen sind operatorseitig, laufen aber gegen eine Freigabeliste: er
 
 Die Aufbewahrung greift ausschließlich auf Verzeichnisse, die exakt wie ein Backup-Lauf eines Zielkontos aussehen (`<ziel>/backup_*/<lauf-id>`). Alles andere auf dem Spiegel bleibt unberührt, auch `current`-Spiegel und fremde Verzeichnisse.
 
-### Exakte Kopie oder längere Historie
+### Drei Betriebsmuster
 
-Beide Betriebsarten sind sinnvoll, sie schließen sich aber gegenseitig aus – die rsync-Optionen entscheiden:
+Wie weit die Historie eines Spiegels reicht, ergibt sich aus dem Zusammenspiel von rsync-Optionen und Intervall. Der Zielserver selbst rotiert nach `snapshot_retention_days`, standardmäßig sieben Tagen.
 
-```text
-Exakte Kopie      -a --delete --stats
-Längere Historie  -a --delete --stats --filter='P backup_*/[0-9]*'
-```
+| Muster | Einstellung | Ergebnis |
+| --- | --- | --- |
+| Zweite Kopie | `-a --delete --stats`, kurzes Intervall | Ausfallsicherheit; die Historie entspricht der des Zielservers |
+| Zeitversetzte Kopie | `-a --delete --stats`, langes Intervall | eingefrorener Stand des letzten Laufs; Größe begrenzt sich selbst |
+| Durchgehende Historie | `-a --delete --stats --filter='P backup_*/[0-9]*'` plus Aufbewahrung | lückenlose Historie über die eingestellten Tage |
 
-Mit dem schlichten `--delete` ist der Spiegel eine exakte Kopie: Er läuft nie voll, weil er alles verwirft, was der Zielserver verwirft – aber genau deshalb ist seine Historie **exakt so lang wie die des Zielservers** (`snapshot_retention_days`, standardmäßig sieben Tage). Zwei Spiegel mit acht und dreißig Tagen lassen sich so nicht bauen.
+**Zeitversetzt:** Läuft ein Spiegel nur alle 30 Tage, hält er bis zum nächsten Lauf den Bestand von damals – kurz vor dem nächsten Lauf also Stände, die auf dem Zielserver seit über drei Wochen rotiert sind. Das kostet nichts an Platz und verzögert außerdem Schaden: Wird der Bestand auf dem Zielserver verschlüsselt oder gelöscht, bleibt bis zum nächsten Lauf Zeit, das zu bemerken. Der Preis ist eine Lücke: Zwischen dem eingefrorenen Stand und dem aktuellen Fenster des Zielservers liegt ein Zeitraum, aus dem nirgends mehr etwas wiederherstellbar ist, und beim nächsten Lauf verschwinden die alten Stände auf einen Schlag.
 
-Die Schutzregel `P backup_*/[0-9]*` nimmt genau die Laufordner von der Löschung aus. Der Zielserver rotiert weiter nach sieben Tagen, auf dem Spiegel bleiben die älteren Stände liegen, und `current`-Spiegel folgen der Quelle trotzdem exakt, weil sie nicht geschützt sind und dort gelöschte Dateien weiterhin entfernt werden. Begrenzt wird der Spiegel dann durch seine eigene **Aufbewahrung** – acht Tage beim einen Ziel, dreißig beim anderen. Ohne gesetzte Aufbewahrung wüchse er unbegrenzt.
+**Durchgehend:** Die Schutzregel `P backup_*/[0-9]*` nimmt die Laufordner von der Löschung aus. Der Zielserver rotiert weiter, auf dem Spiegel bleiben die älteren Stände liegen, und `current`-Spiegel folgen der Quelle trotzdem exakt, weil sie nicht geschützt sind. Begrenzt wird der Spiegel dann durch seine eigene **Aufbewahrung**; ohne gesetzte Aufbewahrung wüchse er unbegrenzt. Dieses Muster ist das einzige, das jeden Tag innerhalb des Fensters abdeckt.
 
 Filterregeln sind auf die auswertenden Typen begrenzt (`P`/`protect`, `+`/`include`, `-`/`exclude`, `H`, `S`, `R`); `merge` und `dir-merge` sind ausgeschlossen, weil sie eine Regeldatei von der Platte lesen würden.
 
