@@ -15,6 +15,7 @@ RAVEN verbindet ein TLS-geschütztes Verwaltungsportal mit einem schlanken Pytho
 - Backup Explorer für Verzeichnisse, Zstandard-Archive und einzelne Downloads
 - lokale Benutzer und Rollen, kurzlebige Deployment-Tokens sowie isolierte SSH-Zielkonten
 - integriertes SQLite, Plain-SMTP-Benachrichtigungen und Let's Encrypt per Cloudflare- oder manueller DNS-01-Challenge
+- Replikation des gesamten Bestands auf beliebig viele Spiegelserver mit eigenem Intervall und eigener Aufbewahrung
 - Aktivitätsfeed auf der Übersicht über eingegangene Backups, Checkerläufe und Verwaltungsaktionen
 - Liveness- und Readiness-Endpunkte für externes Monitoring
 
@@ -224,6 +225,30 @@ Auch das Agent-Skript selbst wird über denselben Kanal aktuell gehalten: Der Ag
 Diese Selbstaktualisierung kann erst greifen, wenn auf der Quelle einmal ein Agent mit dieser Fähigkeit liegt. Quellserver, die noch mit einer älteren Fassung onboarded wurden, brauchen daher genau einmal ein erneutes Deployment über den Curl-Befehl; danach kommen weitere Agentversionen automatisch. Bis dahin bleibt der Zeitplan trotzdem wirksam, weil bereits der zentrale Scheduler nur zum fälligen Termin einen Auftrag erzeugt – die zusätzliche Prüfung auf dem Client fehlt lediglich.
 
 Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem Anderthalbfachen des Intervalls, für den Tagesplan also weiterhin nach 36 Stunden. Ein Eintrag unter `max_age_hours_by_user` in `backup-check.toml` bleibt eine bewusste manuelle Ausnahme und hat Vorrang.
+
+## Spiegelserver
+
+Der Zielserver hält die Sicherungen so lange vor, wie es seine Rotation zulässt. Für eine längere Historie und eine zweite Kopie repliziert RAVEN den gesamten Bestand aus `/home` per rsync auf beliebig viele entfernte Spiegel. Verwaltet werden sie admin-only unter **Spiegelserver**.
+
+Je Ziel werden Hostname, SSH-Port, Benutzer, Zielpfad und ein privater OpenSSH-Schlüssel hinterlegt. Der Schlüssel liegt mit dem Portal-Master-Secret verschlüsselt in SQLite, wird nach dem Speichern nie wieder angezeigt und existiert während eines Laufs nur als root-only Datei unterhalb von `/run`, die danach wieder verschwindet.
+
+Vor dem ersten Lauf muss der **Hostschlüssel** des Ziels gepinnt werden; der Knopf holt ihn per `ssh-keyscan` und zeigt den Fingerabdruck an. Repliziert wird ausschließlich mit `StrictHostKeyChecking=yes` gegen genau diesen Eintrag, und eine geänderte Adresse verwirft ihn wieder. Ohne Schlüsselpaar läuft kein Ziel an.
+
+Jedes Ziel hat sein eigenes **Intervall**, seine eigenen **rsync-Optionen** und seine eigene **Aufbewahrung**. So entstehen unterschiedlich lange Historien nebeneinander – etwa ein Spiegel über acht und ein zweiter über dreißig Tage:
+
+| Einstellung | Bedeutung |
+| --- | --- |
+| Intervall | Stunden zwischen zwei Replikationsläufen dieses Ziels |
+| rsync-Optionen | Übertragungsverhalten, z. B. `-a --delete --stats` oder `-avz --bwlimit=50M` |
+| Aufbewahrung | Tage, nach denen Laufordner auf dem Spiegel entfernt werden; `0` entfernt nichts |
+
+Die rsync-Optionen sind operatorseitig, laufen aber gegen eine Freigabeliste: erlaubt sind Optionen, die beschreiben *was* übertragen wird, niemals solche, die bestimmen *wie* die Gegenseite erreicht wird. `-e`, `--rsh`, `--rsync-path`, `--files-from` und Verwandte werden abgelehnt, weil sie fremde Programme starten könnten; Quelle, Ziel und SSH-Transport setzt RAVEN selbst.
+
+Die Aufbewahrung greift ausschließlich auf Verzeichnisse, die exakt wie ein Backup-Lauf eines Zielkontos aussehen (`<ziel>/backup_*/<lauf-id>`). Alles andere auf dem Spiegel bleibt unberührt, auch `current`-Spiegel und fremde Verzeichnisse. Mit `--delete` folgt der Spiegel dem Zielserver; ohne `--delete` wachsen die Stände an, und erst die Aufbewahrung begrenzt sie.
+
+Ein eigener Portal-Worker führt immer nur eine Replikation gleichzeitig aus. Zu Beginn jedes Laufs wird der freie Speicher des Ziels über `df` ermittelt und in der Oberfläche ausgewiesen. Status, Dauer, übertragenes Volumen und die vollständige rsync-Ausgabe stehen je Lauf zur Verfügung, ein Lauf lässt sich jederzeit manuell auslösen, und die Ergebnisse erscheinen zusätzlich im Aktivitätsfeed der Übersicht. rsync-Status 24 gilt als Erfolg: er bedeutet nur, dass während des Laufs eine Datei verschwunden ist, was auf einem aktiven Backupbestand regelmäßig vorkommt.
+
+Wird ein Ziel im Portal entfernt, verschwinden Zugangsdaten, Zeitplan und Historie – die bereits replizierten Daten auf dem Spiegel bleiben liegen.
 
 ## Veränderung erkennen
 

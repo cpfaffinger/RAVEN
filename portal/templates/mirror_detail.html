@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}{{ target.name }} · Spiegelserver{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">Spiegelserver</p><h1>{{ target.name }}</h1><p class="muted">{{ target.username }}@{{ target.host }}:{{ target.ssh_port }} → <code>{{ target.remote_path }}</code></p></div><a class="secondary button" href="/mirrors">Alle Spiegel</a></div>
+{% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
+<section class="panel control-panel">
+  <div><p class="eyebrow">Replikation</p><h2>Bestand jetzt spiegeln</h2><p class="muted">Repliziert <code>{{ source_path }}</code> vollständig auf dieses Ziel. Es läuft immer nur eine Replikation gleichzeitig.</p></div>
+  <div class="control-facts"><span>Status<strong>{{ (target.last_status or 'kein Lauf')|upper }}</strong></span><span>Nächster Lauf<strong>{{ target.next_run_display if target.enabled else 'PAUSIERT' }}</strong></span><span>Freier Speicher<strong>{{ target.free }}</strong></span></div>
+  <form method="post" action="/mirrors/{{ target.id }}/run"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="primary" {% if busy or not target.ready %}disabled{% endif %}>Replikation starten</button></form>
+</section>
+<section class="detail-grid">
+  <article class="panel"><div class="panel-head"><h2>Verbindung</h2><span class="status {{ 'ok' if target.ready else 'stale' }}">{{ 'BEREIT' if target.ready else 'UNVOLLSTÄNDIG' }}</span></div>
+    <dl><dt>Privater Schlüssel</dt><dd>{{ 'hinterlegt und verschlüsselt' if target.key_configured else 'fehlt' }}</dd><dt>Hostschlüssel</dt><dd>{{ 'gepinnt' if target.host_key_configured else 'fehlt' }}</dd><dt>rsync-Optionen</dt><dd><code>{{ target.rsync_options }}</code></dd><dt>Intervall</dt><dd>alle {{ target.interval_hours }} Stunden</dd><dt>Aufbewahrung</dt><dd>{{ (target.retention_days ~ ' Tage') if target.retention_days else 'unbegrenzt, es wird nichts entfernt' }}</dd></dl>
+    <form method="post" action="/mirrors/{{ target.id }}/host-key" class="actions split-actions"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary">Hostschlüssel abrufen</button><span class="copy-result">Holt den Schlüssel per ssh-keyscan und pinnt ihn für alle künftigen Läufe.</span></form>
+    {% if target.host_key_configured %}<pre class="agent-log">{{ target.host_key }}</pre>{% endif %}
+  </article>
+  <article class="panel"><div class="panel-head"><h2>Speicher am Ziel</h2><span class="muted">{{ target.space_checked_at or 'noch nicht geprüft' }}</span></div>
+    {% if target.free_percent is not none %}<div class="space-bar"><span style="width: {{ target.used_percent }}%"></span></div>
+    <dl><dt>Frei</dt><dd>{{ target.free }} ({{ target.free_percent }} %)</dd><dt>Gesamt</dt><dd>{{ target.total }}</dd><dt>Belegt</dt><dd>{{ target.used_percent }} %</dd></dl>
+    {% else %}<p class="muted">Der freie Speicher wird zu Beginn jeder Replikation über <code>df</code> auf dem Zielserver ermittelt.</p>{% endif %}
+    <dl><dt>Letzter Lauf</dt><dd>{{ target.last_run_at or 'noch keiner' }}</dd><dt>Ergebnis</dt><dd>{{ target.last_message or '–' }}</dd></dl>
+  </article>
+</section>
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Einstellungen</p><h2>Ziel bearbeiten</h2></div><span class="muted">Adressänderung verwirft den gepinnten Hostschlüssel</span></div>
+  <form method="post" action="/mirrors/{{ target.id }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="form-grid">
+      <label>Name<input name="name" value="{{ target.name }}" minlength="3" maxlength="60" required></label>
+      <label>Hostname<input name="host" value="{{ target.host }}" required maxlength="253"></label>
+    </div>
+    <div class="form-grid">
+      <label>SSH-Port<input type="number" name="ssh_port" min="1" max="65535" value="{{ target.ssh_port }}" required></label>
+      <label>Benutzer<input name="username" value="{{ target.username }}" required pattern="[a-z_][a-z0-9_-]{0,31}"></label>
+    </div>
+    <div class="form-grid">
+      <label>Zielpfad<input name="remote_path" value="{{ target.remote_path }}" required></label>
+      <label>rsync-Optionen<small>Erlaubt sind Übertragungsoptionen wie <code>-avz</code>, <code>--delete</code>, <code>--bwlimit=</code> oder <code>--exclude=</code></small><input name="rsync_options" value="{{ target.rsync_options }}" maxlength="500" required></label>
+    </div>
+    <div class="form-grid">
+      <label>Replikationsintervall in Stunden<input type="number" name="interval_hours" min="1" max="168" value="{{ target.interval_hours }}" required></label>
+      <label>Aufbewahrung in Tagen<small>0 entfernt nichts; sonst werden Laufordner auf dem Spiegel gelöscht, die älter sind</small><input type="number" name="retention_days" min="0" max="3650" value="{{ target.retention_days }}" required></label>
+    </div>
+    <label>Neuer privater SSH-Schlüssel<small>Leer lassen, um den gespeicherten Schlüssel beizubehalten.</small><textarea name="private_key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+    <div class="checks"><label><input type="checkbox" name="enabled" {% if target.enabled %}checked{% endif %}> Automatische Replikation aktiv</label></div>
+    <div class="actions"><button class="primary">Ziel speichern</button></div>
+  </form>
+</section>
+<section class="panel"><div class="panel-head"><h2>Replikationsläufe</h2><span class="muted">Letzte 30</span></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Angefordert</th><th>Modus</th><th>Status</th><th>Zeitraum</th><th>Ergebnis</th></tr></thead><tbody>{% for run in runs %}<tr><td><a href="/mirrors/runs/{{ run.id }}">#{{ run.id }}</a></td><td>{{ run.requested_at }}<small>{{ run.requested_by_name or 'Zeitplan' }}</small></td><td>{{ 'Manuell' if run.mode == 'manual' else 'Zeitplan' }}</td><td><span class="status {{ run.status }}">{{ run.status|upper }}</span></td><td>{% if run.started_at and run.finished_at %}{{ run.started_at }} → {{ run.finished_at }}{% elif run.started_at %}Läuft seit {{ run.started_at }}{% else %}–{% endif %}</td><td>{{ run.summary or '–' }}</td></tr>{% else %}<tr><td colspan="6" class="empty">Noch keine Replikationsläufe.</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="panel danger-zone"><div><p class="eyebrow">Gefahrenbereich</p><h2>Spiegelziel entfernen</h2><p class="muted">Entfernt Zugangsdaten, Zeitplan und Laufhistorie aus dem Portal. Die bereits replizierten Daten auf <code>{{ target.host }}</code> bleiben unverändert liegen.</p></div><form method="post" action="/mirrors/{{ target.id }}/delete" data-confirm="Spiegelziel „{{ target.name }}“ wirklich aus dem Portal entfernen?"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Ziel entfernen</button></form></section>
+{% endblock %}

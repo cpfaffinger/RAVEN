@@ -22,11 +22,11 @@
 <section class="panel">
   <div class="panel-head">
     <div><p class="eyebrow">Letzte Ereignisse</p><h2>Aktivität</h2></div>
-    <nav class="activity-filter">{% for key, label in [('all', 'Alle'), ('backup', 'Backups'), ('checker', 'Checker'), ('admin', 'Verwaltung')] %}<a class="{{ 'active' if activity == key else '' }}" href="/?sort={{ sort }}&amp;direction={{ direction }}&amp;activity={{ key }}">{{ label }}</a>{% endfor %}</nav>
+    <nav class="activity-filter">{% for key, label in [('all', 'Alle'), ('backup', 'Backups'), ('checker', 'Checker'), ('mirror', 'Spiegel'), ('admin', 'Verwaltung')] %}<a class="{{ 'active' if activity == key else '' }}" href="/?sort={{ sort }}&amp;direction={{ direction }}&amp;activity={{ key }}">{{ label }}</a>{% endfor %}</nav>
   </div>
   <ol class="activity-feed">{% for entry in activity_entries %}<li class="activity-{{ entry.status }}">
     <time datetime="{{ entry.at }}">{{ entry.when }}</time>
-    <span class="activity-kind kind-{{ entry.kind }}">{{ {'backup': 'BACKUP', 'checker': 'CHECKER', 'admin': 'VERWALTUNG'}[entry.kind] }}</span>
+    <span class="activity-kind kind-{{ entry.kind }}">{{ {'backup': 'BACKUP', 'checker': 'CHECKER', 'mirror': 'SPIEGEL', 'admin': 'VERWALTUNG'}[entry.kind] }}</span>
     <span class="activity-text"><strong>{{ entry.title }}</strong>{% if entry.link %} <a href="{{ entry.link }}">{{ entry.subject }}</a>{% else %} <span>{{ entry.subject }}</span>{% endif %}{% if entry.detail %}<small>{{ entry.detail }}</small>{% endif %}</span>
   </li>{% else %}<li class="empty">Noch keine Ereignisse aufgezeichnet.</li>{% endfor %}</ol>
 </section>

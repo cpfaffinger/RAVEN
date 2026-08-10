@@ -38,6 +38,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 import backup_schedule
+import mirror as mirror_module
 from domain_config import resolve_domain_config
 from runtime_config import bootstrap_settings, effective_settings, runtime_config
 
@@ -77,6 +78,10 @@ SCHEDULER_THREAD: threading.Thread | None = None
 CHECKER_STOP = threading.Event()
 CHECKER_WAKEUP = threading.Event()
 CHECKER_THREAD: threading.Thread | None = None
+MIRROR_STOP = threading.Event()
+MIRROR_WAKEUP = threading.Event()
+MIRROR_THREAD: threading.Thread | None = None
+MIRROR_TIMEOUT_SECONDS = 21600
 AGENT_SCRIPT_LOCK = threading.Lock()
 AGENT_SCRIPT_CACHE: tuple[tuple[int, int], str, bytes] | None = None
 ARCHIVE_SCAN_LOCK = threading.BoundedSemaphore(2)
@@ -397,6 +402,31 @@ def init_db() -> None:
               database_split_threshold_bytes INTEGER NOT NULL,
               updated_by INTEGER REFERENCES users(id), updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS mirror_targets (
+              id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,
+              host TEXT NOT NULL, ssh_port INTEGER NOT NULL DEFAULT 22,
+              username TEXT NOT NULL, remote_path TEXT NOT NULL,
+              private_key_ciphertext TEXT NOT NULL DEFAULT '',
+              host_key TEXT NOT NULL DEFAULT '',
+              rsync_options TEXT NOT NULL DEFAULT '-a --delete --stats',
+              interval_hours INTEGER NOT NULL DEFAULT 24,
+              retention_days INTEGER NOT NULL DEFAULT 0,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              next_run_at TEXT,
+              last_status TEXT, last_run_at TEXT, last_message TEXT,
+              total_bytes INTEGER, free_bytes INTEGER, space_checked_at TEXT,
+              updated_by INTEGER REFERENCES users(id),
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mirror_runs (
+              id INTEGER PRIMARY KEY,
+              target_id INTEGER NOT NULL REFERENCES mirror_targets(id) ON DELETE CASCADE,
+              mode TEXT NOT NULL CHECK(mode IN ('scheduled','manual')),
+              status TEXT NOT NULL CHECK(status IN ('queued','running','success','failure','interrupted')),
+              requested_by INTEGER REFERENCES users(id), requested_at TEXT NOT NULL,
+              started_at TEXT, finished_at TEXT, exit_code INTEGER,
+              transferred_bytes INTEGER, summary TEXT, output TEXT
+            );
             CREATE TABLE IF NOT EXISTS cloudflare_test_runs (
               id INTEGER PRIMARY KEY,
               status TEXT NOT NULL CHECK(status IN ('success','failure')),
@@ -414,6 +444,8 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_commands_client_status ON backup_commands(client_id,status,id);
             CREATE INDEX IF NOT EXISTS idx_run_logs_client_time ON backup_run_logs(client_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_checker_runs_status ON checker_runs(status,id);
+            CREATE INDEX IF NOT EXISTS idx_mirror_runs_target ON mirror_runs(target_id,id DESC);
+            CREATE INDEX IF NOT EXISTS idx_mirror_runs_status ON mirror_runs(status,id);
             CREATE INDEX IF NOT EXISTS idx_cloudflare_tests_time ON cloudflare_test_runs(id DESC);
             """
         )
@@ -1195,6 +1227,211 @@ def execute_checker_run(run: sqlite3.Row) -> None:
                 pass
 
 
+def mirror_credentials(target: sqlite3.Row) -> tuple[Path, Path]:
+    """Materialise key and known_hosts for one run, readable only by root."""
+    key = decrypt_deployment_token(str(target["private_key_ciphertext"]))
+    if not key.strip():
+        raise RuntimeError("Fuer dieses Ziel ist kein privater Schluessel hinterlegt")
+    host_key = str(target["host_key"] or "").strip()
+    if not host_key:
+        raise RuntimeError("Fuer dieses Ziel ist kein Hostschluessel hinterlegt")
+    stamp = f"{os.getpid()}-{int(target['id'])}"
+    paths: list[Path] = []
+    for name, payload in (("key", key), ("known-hosts", host_key + "\n")):
+        path = Path(f"/run/backup-portal-mirror-{name}-{stamp}")
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        paths.append(path)
+    return paths[0], paths[1]
+
+
+def mirror_disk_usage(target: sqlite3.Row, key_path: Path, known_hosts_path: Path) -> tuple[int, int]:
+    process = subprocess.run(
+        mirror_module.ssh_command(
+            username=str(target["username"]), host=str(target["host"]),
+            remote_command=mirror_module.disk_usage_command(str(target["remote_path"])),
+            key_path=str(key_path), known_hosts_path=str(known_hosts_path),
+            port=int(target["ssh_port"]),
+        ),
+        capture_output=True, text=True, errors="replace", timeout=60, check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError((process.stderr or "df fehlgeschlagen").strip()[:300])
+    return mirror_module.parse_disk_usage(process.stdout)
+
+
+def enqueue_due_mirrors() -> None:
+    now = datetime.now(timezone.utc)
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for target in connection.execute(
+            "SELECT * FROM mirror_targets WHERE enabled=1 AND private_key_ciphertext<>'' AND host_key<>''"
+        ).fetchall():
+            due = parsed_timestamp(target["next_run_at"])
+            if due and due.astimezone(timezone.utc) > now:
+                continue
+            pending = connection.execute(
+                "SELECT 1 FROM mirror_runs WHERE target_id=? AND status IN ('queued','running')",
+                (target["id"],),
+            ).fetchone()
+            if not pending:
+                connection.execute(
+                    "INSERT INTO mirror_runs(target_id,mode,status,requested_at) VALUES(?,'scheduled','queued',?)",
+                    (target["id"], now_iso()),
+                )
+            interval = max(1, min(168, int(target["interval_hours"])))
+            connection.execute(
+                "UPDATE mirror_targets SET next_run_at=? WHERE id=?",
+                ((now + timedelta(hours=interval)).isoformat(), target["id"]),
+            )
+
+
+def claim_mirror_run() -> sqlite3.Row | None:
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute("SELECT 1 FROM mirror_runs WHERE status='running'").fetchone():
+            return None
+        run = connection.execute(
+            "SELECT * FROM mirror_runs WHERE status='queued' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not run:
+            return None
+        connection.execute(
+            "UPDATE mirror_runs SET status='running',started_at=? WHERE id=? AND status='queued'",
+            (now_iso(), run["id"]),
+        )
+        return connection.execute("SELECT * FROM mirror_runs WHERE id=?", (run["id"],)).fetchone()
+
+
+def finish_mirror_run(
+    run_id: int, target_id: int, status: str, *, exit_code: int | None,
+    summary: str, output: str, transferred: int | None = None,
+) -> None:
+    with db() as connection:
+        connection.execute(
+            "UPDATE mirror_runs SET status=?,finished_at=?,exit_code=?,transferred_bytes=?,summary=?,output=? "
+            "WHERE id=?",
+            (status, now_iso(), exit_code, transferred, summary[:1000], output[-250_000:], run_id),
+        )
+        connection.execute(
+            "UPDATE mirror_targets SET last_status=?,last_run_at=?,last_message=? WHERE id=?",
+            (status, now_iso(), summary[:1000], target_id),
+        )
+        connection.execute(
+            "DELETE FROM mirror_runs WHERE target_id=? AND id IN "
+            "(SELECT id FROM mirror_runs WHERE target_id=? ORDER BY id DESC LIMIT -1 OFFSET 50)",
+            (target_id, target_id),
+        )
+
+
+def execute_mirror_run(run: sqlite3.Row) -> None:
+    """Replicate the whole backup store to one mirror and prune it if asked."""
+    run_id = int(run["id"])
+    target_id = int(run["target_id"])
+    with db() as connection:
+        target = connection.execute("SELECT * FROM mirror_targets WHERE id=?", (target_id,)).fetchone()
+    if not target:
+        finish_mirror_run(run_id, target_id, "failure", exit_code=None,
+                          summary="Spiegelziel existiert nicht mehr", output="")
+        return
+    sections: list[str] = []
+    key_path: Path | None = None
+    known_hosts_path: Path | None = None
+    try:
+        options = mirror_module.validated_rsync_options(str(target["rsync_options"]))
+        key_path, known_hosts_path = mirror_credentials(target)
+        try:
+            total, free = mirror_disk_usage(target, key_path, known_hosts_path)
+            with db() as connection:
+                connection.execute(
+                    "UPDATE mirror_targets SET total_bytes=?,free_bytes=?,space_checked_at=? WHERE id=?",
+                    (total, free, now_iso(), target_id),
+                )
+            sections.append(f"Zielspeicher: {format_size(free)} frei von {format_size(total)}")
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            sections.append(f"Zielspeicher konnte nicht gelesen werden: {exc}")
+        command = mirror_module.rsync_command(
+            source_path=str(HOME_ROOT), username=str(target["username"]), host=str(target["host"]),
+            remote_path=str(target["remote_path"]), options=options,
+            key_path=str(key_path), known_hosts_path=str(known_hosts_path),
+            port=int(target["ssh_port"]),
+        )
+        LOG.info("Spiegelreplikation %s gestartet: %s", target["name"], target["host"])
+        process = subprocess.run(
+            command, capture_output=True, text=True, errors="replace",
+            timeout=MIRROR_TIMEOUT_SECONDS, check=False,
+        )
+        transferred = mirror_module.parse_transferred_bytes(process.stdout)
+        sections.append((process.stdout + "\n" + process.stderr).strip())
+        # rsync reports 24 when a file vanished mid-transfer; a live backup store
+        # does that regularly and the replication itself is still complete.
+        acceptable = process.returncode in {0, 24}
+        if acceptable and int(target["retention_days"]) > 0:
+            prune = subprocess.run(
+                mirror_module.ssh_command(
+                    username=str(target["username"]), host=str(target["host"]),
+                    remote_command=mirror_module.retention_command(
+                        str(target["remote_path"]), int(target["retention_days"])
+                    ),
+                    key_path=str(key_path), known_hosts_path=str(known_hosts_path),
+                    port=int(target["ssh_port"]),
+                ),
+                capture_output=True, text=True, errors="replace", timeout=1800, check=False,
+            )
+            removed = [line for line in prune.stdout.splitlines() if line.strip()]
+            sections.append(
+                f"Aufbewahrung {int(target['retention_days'])} Tage: {len(removed)} Laeufe entfernt\n"
+                + "\n".join(removed[:200])
+            )
+        status = "success" if acceptable else "failure"
+        summary = (
+            f"Replikation nach {target['host']} abgeschlossen"
+            + (f", {format_size(transferred)} uebertragen" if transferred is not None else "")
+            if acceptable
+            else f"rsync endete mit Status {process.returncode}"
+        )
+        finish_mirror_run(
+            run_id, target_id, status, exit_code=process.returncode,
+            summary=summary, output="\n\n".join(sections), transferred=transferred,
+        )
+        LOG.info("Spiegelreplikation %s beendet: %s", target["name"], summary)
+    except subprocess.TimeoutExpired:
+        finish_mirror_run(
+            run_id, target_id, "failure", exit_code=124,
+            summary=f"Zeitlimit von {MIRROR_TIMEOUT_SECONDS} Sekunden ueberschritten",
+            output="\n\n".join(sections),
+        )
+        LOG.error("Spiegelreplikation %s hat das Zeitlimit ueberschritten", target["name"])
+    except Exception as exc:
+        finish_mirror_run(
+            run_id, target_id, "failure", exit_code=2,
+            summary=f"{type(exc).__name__}: {exc}", output="\n\n".join(sections),
+        )
+        LOG.exception("Spiegelreplikation %s fehlgeschlagen", target["name"])
+    finally:
+        for path in (key_path, known_hosts_path):
+            if path:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+
+
+def mirror_loop() -> None:
+    while not MIRROR_STOP.is_set():
+        try:
+            enqueue_due_mirrors()
+            run = claim_mirror_run()
+            if run:
+                execute_mirror_run(run)
+                continue
+        except Exception:
+            LOG.exception("Spiegel-Worker fehlgeschlagen")
+        MIRROR_WAKEUP.wait(30)
+        MIRROR_WAKEUP.clear()
+
+
 def checker_loop() -> None:
     while not CHECKER_STOP.is_set():
         try:
@@ -1219,7 +1456,7 @@ def scheduler_loop() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    global SCHEDULER_THREAD, CHECKER_THREAD
+    global SCHEDULER_THREAD, CHECKER_THREAD, MIRROR_THREAD
     init_db()
     imported = import_existing_clients()
     if imported:
@@ -1231,6 +1468,11 @@ def startup() -> None:
             "WHERE status='running'",
             (now_iso(),),
         )
+        connection.execute(
+            "UPDATE mirror_runs SET status='interrupted',finished_at=?,summary='Portal wurde waehrend des Laufs beendet' "
+            "WHERE status='running'",
+            (now_iso(),),
+        )
     SCHEDULER_STOP.clear()
     SCHEDULER_THREAD = threading.Thread(target=scheduler_loop, name="backup-scheduler", daemon=True)
     SCHEDULER_THREAD.start()
@@ -1238,6 +1480,10 @@ def startup() -> None:
     CHECKER_WAKEUP.clear()
     CHECKER_THREAD = threading.Thread(target=checker_loop, name="checker-worker", daemon=True)
     CHECKER_THREAD.start()
+    MIRROR_STOP.clear()
+    MIRROR_WAKEUP.clear()
+    MIRROR_THREAD = threading.Thread(target=mirror_loop, name="mirror-worker", daemon=True)
+    MIRROR_THREAD.start()
 
 
 @app.on_event("shutdown")
@@ -1245,10 +1491,14 @@ def shutdown() -> None:
     SCHEDULER_STOP.set()
     CHECKER_STOP.set()
     CHECKER_WAKEUP.set()
+    MIRROR_STOP.set()
+    MIRROR_WAKEUP.set()
     if SCHEDULER_THREAD:
         SCHEDULER_THREAD.join(timeout=5)
     if CHECKER_THREAD:
         CHECKER_THREAD.join(timeout=5)
+    if MIRROR_THREAD:
+        MIRROR_THREAD.join(timeout=5)
 
 
 @app.get("/livez")
@@ -1280,6 +1530,7 @@ def readiness_result() -> tuple[bool, dict[str, Any]]:
 
     checks["checker_state_available"] = CHECKER_STATE.is_file() and os.access(CHECKER_STATE, os.R_OK)
     checks["scheduler"] = bool(SCHEDULER_THREAD and SCHEDULER_THREAD.is_alive())
+    checks["mirror_worker"] = bool(MIRROR_THREAD and MIRROR_THREAD.is_alive())
     checks["checker_script"] = CHECKER_SCRIPT.is_file() and os.access(CHECKER_SCRIPT, os.R_OK)
     checks["checker_config"] = CHECKER_CONFIG_PATH.is_file() and os.access(CHECKER_CONFIG_PATH, os.R_OK)
     checks["checker_worker"] = bool(CHECKER_THREAD and CHECKER_THREAD.is_alive())
@@ -1294,7 +1545,7 @@ def readiness_result() -> tuple[bool, dict[str, Any]]:
             checks["cloudflare_token_error"] = type(exc).__name__
     critical = [
         "database", "backup_script", "bootstrap_script", "home_root", "token_encryption",
-        "scheduler", "checker_script", "checker_config", "checker_worker",
+        "scheduler", "checker_script", "checker_config", "checker_worker", "mirror_worker",
     ]
     if ACME_CONFIG.get("mode") in {"dns-manual", "dns-cloudflare"}:
         critical.append("acme_dns_hook")
@@ -1641,6 +1892,12 @@ def processes_page(request: Request):
                 "result": "läuft" if CHECKER_THREAD and CHECKER_THREAD.is_alive() else "gestoppt",
                 "started_at": "Portalstart", "finished_at": "", "details": "Checker-Warteschlange",
             },
+            {
+                "name": "Spiegel-Worker", "kind": "Portal-Thread",
+                "status": "success" if MIRROR_THREAD and MIRROR_THREAD.is_alive() else "failure",
+                "result": "läuft" if MIRROR_THREAD and MIRROR_THREAD.is_alive() else "gestoppt",
+                "started_at": "Portalstart", "finished_at": "", "details": "Replikation auf Spiegelserver",
+            },
         ]
     )
     with db() as connection:
@@ -1876,7 +2133,7 @@ def logout(request: Request, csrf_token: str = Form(...)):
 
 
 ACTIVITY_LIMIT = 30
-ACTIVITY_KINDS = ("all", "backup", "checker", "admin")
+ACTIVITY_KINDS = ("all", "backup", "checker", "mirror", "admin")
 AUDIT_LABELS = {
     "backup.trigger": "Backup manuell angefordert",
     "backup.download": "Datei aus Backup geladen",
@@ -1884,6 +2141,11 @@ AUDIT_LABELS = {
     "certificate.request": "Zertifikat angefordert",
     "checker.settings": "Checker-Einstellungen geändert",
     "checker.trigger": "Checkerlauf gestartet",
+    "mirror.create": "Spiegelziel angelegt",
+    "mirror.delete": "Spiegelziel entfernt",
+    "mirror.host_key": "Hostschlüssel gepinnt",
+    "mirror.trigger": "Replikation angefordert",
+    "mirror.update": "Spiegelziel geändert",
     "client.agent_config": "Agent-Konfiguration geändert",
     "client.create": "Server angelegt",
     "client.delete": "Server entfernt",
@@ -2000,6 +2262,22 @@ def activity_feed(kind: str = "all", limit: int = ACTIVITY_LIMIT) -> list[dict[s
                     "subject": "Checker",
                     "detail": str(row["summary"] or ""),
                     "link": f"/checker/runs/{int(row['id'])}",
+                })
+        if kind in {"all", "mirror"}:
+            for row in connection.execute(
+                "SELECT r.id,r.status,r.summary,r.finished_at,r.mode,t.name,t.id AS target_id "
+                "FROM mirror_runs r JOIN mirror_targets t ON t.id=r.target_id "
+                "WHERE r.finished_at IS NOT NULL ORDER BY r.id DESC LIMIT ?",
+                (limit if kind == "mirror" else 5,),
+            ):
+                entries.append({
+                    "at": parsed_timestamp(row["finished_at"]),
+                    "kind": "mirror",
+                    "status": "success" if row["status"] == "success" else "failure",
+                    "title": "Replikation manuell" if row["mode"] == "manual" else "Replikation",
+                    "subject": str(row["name"]),
+                    "detail": str(row["summary"] or ""),
+                    "link": f"/mirrors/runs/{int(row['id'])}",
                 })
         if kind in {"all", "admin"}:
             for row in connection.execute(
@@ -2259,6 +2537,289 @@ EXPLORER_SORT_KEYS = ("name", "type", "size", "modified", "created")
 EXPLORER_MAX_ARCHIVE_MEMBERS = 50_000
 EXPLORER_ARCHIVE_CACHE_SECONDS = 300
 EXPLORER_ARCHIVE_CACHE_ITEMS = 4
+
+
+def mirror_target_view(target: sqlite3.Row) -> dict[str, Any]:
+    """Enrich a mirror target with the values the templates display."""
+    item = dict(target)
+    item["key_configured"] = bool(str(target["private_key_ciphertext"] or ""))
+    item["host_key_configured"] = bool(str(target["host_key"] or "").strip())
+    item["ready"] = item["key_configured"] and item["host_key_configured"]
+    item["free"] = format_size(target["free_bytes"]) if target["free_bytes"] is not None else "–"
+    item["total"] = format_size(target["total_bytes"]) if target["total_bytes"] is not None else "–"
+    total = int(target["total_bytes"] or 0)
+    free = int(target["free_bytes"] or 0)
+    item["free_percent"] = round(free / total * 100, 1) if total else None
+    item["used_percent"] = round((total - free) / total * 100, 1) if total else 0
+    item["next_run_display"] = (
+        parsed_timestamp(target["next_run_at"]).astimezone().strftime("%d.%m.%Y %H:%M")
+        if target["next_run_at"] and target["enabled"] else "–"
+    )
+    return item
+
+
+def enqueue_mirror_run(target_id: int, mode: str, requested_by: int | None = None) -> int | None:
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        target = connection.execute(
+            "SELECT * FROM mirror_targets WHERE id=?", (target_id,)
+        ).fetchone()
+        if not target:
+            raise HTTPException(404)
+        if not str(target["private_key_ciphertext"] or "") or not str(target["host_key"] or "").strip():
+            raise HTTPException(409, "Privater Schluessel und Hostschluessel muessen hinterlegt sein")
+        if connection.execute(
+            "SELECT 1 FROM mirror_runs WHERE target_id=? AND status IN ('queued','running')",
+            (target_id,),
+        ).fetchone():
+            return None
+        cursor = connection.execute(
+            "INSERT INTO mirror_runs(target_id,mode,status,requested_by,requested_at) VALUES(?,?,'queued',?,?)",
+            (target_id, mode, requested_by, now_iso()),
+        )
+        run_id = int(cursor.lastrowid)
+    MIRROR_WAKEUP.set()
+    return run_id
+
+
+@app.get("/mirrors", response_class=HTMLResponse)
+def mirrors_page(request: Request):
+    require_user(request, admin=True)
+    with db() as connection:
+        targets = connection.execute("SELECT * FROM mirror_targets ORDER BY name").fetchall()
+        runs = connection.execute(
+            "SELECT r.*,t.name AS target_name FROM mirror_runs r "
+            "JOIN mirror_targets t ON t.id=r.target_id ORDER BY r.id DESC LIMIT 20"
+        ).fetchall()
+    return render(request, "mirrors.html", {
+        "targets": [mirror_target_view(target) for target in targets],
+        "runs": runs,
+        "default_options": mirror_module.DEFAULT_RSYNC_OPTIONS,
+        "source_path": str(HOME_ROOT),
+        "message": request.query_params.get("message", ""),
+    })
+
+
+@app.post("/mirrors")
+def mirror_create(
+    request: Request,
+    name: str = Form(...),
+    host: str = Form(...),
+    ssh_port: int = Form(22),
+    username: str = Form(...),
+    remote_path: str = Form(...),
+    private_key: str = Form(...),
+    rsync_options: str = Form(mirror_module.DEFAULT_RSYNC_OPTIONS),
+    interval_hours: int = Form(24),
+    retention_days: int = Form(0),
+    enabled: str | None = Form(None),
+    csrf_token: str = Form(...),
+):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    name = name.strip()
+    if not (3 <= len(name) <= 60):
+        raise HTTPException(400, "Name muss 3 bis 60 Zeichen lang sein")
+    try:
+        values = mirror_module.validated_target(
+            host=host, username=username, remote_path=remote_path, ssh_port=ssh_port,
+            interval_hours=interval_hours, retention_days=retention_days, rsync_options=rsync_options,
+        )
+        key = mirror_module.normalized_private_key(private_key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        with db() as connection:
+            cursor = connection.execute(
+                "INSERT INTO mirror_targets(name,host,ssh_port,username,remote_path,private_key_ciphertext,"
+                "rsync_options,interval_hours,retention_days,enabled,updated_by,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    name, values["host"], values["ssh_port"], values["username"], values["remote_path"],
+                    encrypt_deployment_token(key), values["rsync_options"], values["interval_hours"],
+                    values["retention_days"], bool(enabled), user["id"], now_iso(), now_iso(),
+                ),
+            )
+            target_id = int(cursor.lastrowid)
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "Ein Spiegelziel mit diesem Namen existiert bereits")
+    audit(request, "mirror.create", name, f"host={values['host']}", user_id=user["id"])
+    return RedirectResponse(
+        f"/mirrors/{target_id}?message={quote('Spiegelziel angelegt; jetzt den Hostschlüssel abrufen')}",
+        status_code=303,
+    )
+
+
+@app.get("/mirrors/{target_id}", response_class=HTMLResponse)
+def mirror_detail(request: Request, target_id: int):
+    require_user(request, admin=True)
+    with db() as connection:
+        target = connection.execute("SELECT * FROM mirror_targets WHERE id=?", (target_id,)).fetchone()
+        if not target:
+            raise HTTPException(404)
+        runs = connection.execute(
+            "SELECT r.*,u.username AS requested_by_name FROM mirror_runs r "
+            "LEFT JOIN users u ON u.id=r.requested_by WHERE r.target_id=? ORDER BY r.id DESC LIMIT 30",
+            (target_id,),
+        ).fetchall()
+        active = connection.execute(
+            "SELECT 1 FROM mirror_runs WHERE target_id=? AND status IN ('queued','running')",
+            (target_id,),
+        ).fetchone()
+    return render(request, "mirror_detail.html", {
+        "target": mirror_target_view(target),
+        "runs": runs,
+        "busy": bool(active),
+        "source_path": str(HOME_ROOT),
+        "message": request.query_params.get("message", ""),
+    })
+
+
+@app.post("/mirrors/{target_id}")
+def mirror_update(
+    request: Request,
+    target_id: int,
+    name: str = Form(...),
+    host: str = Form(...),
+    ssh_port: int = Form(22),
+    username: str = Form(...),
+    remote_path: str = Form(...),
+    private_key: str = Form(""),
+    rsync_options: str = Form(mirror_module.DEFAULT_RSYNC_OPTIONS),
+    interval_hours: int = Form(24),
+    retention_days: int = Form(0),
+    enabled: str | None = Form(None),
+    csrf_token: str = Form(...),
+):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    name = name.strip()
+    if not (3 <= len(name) <= 60):
+        raise HTTPException(400, "Name muss 3 bis 60 Zeichen lang sein")
+    try:
+        values = mirror_module.validated_target(
+            host=host, username=username, remote_path=remote_path, ssh_port=ssh_port,
+            interval_hours=interval_hours, retention_days=retention_days, rsync_options=rsync_options,
+        )
+        key = mirror_module.normalized_private_key(private_key) if private_key.strip() else ""
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        with db() as connection:
+            current = connection.execute(
+                "SELECT * FROM mirror_targets WHERE id=?", (target_id,)
+            ).fetchone()
+            if not current:
+                raise HTTPException(404)
+            # A changed address invalidates the pinned host key.
+            address_changed = (
+                values["host"] != str(current["host"]) or values["ssh_port"] != int(current["ssh_port"])
+            )
+            connection.execute(
+                "UPDATE mirror_targets SET name=?,host=?,ssh_port=?,username=?,remote_path=?,"
+                "rsync_options=?,interval_hours=?,retention_days=?,enabled=?,"
+                "private_key_ciphertext=CASE WHEN ?<>'' THEN ? ELSE private_key_ciphertext END,"
+                "host_key=CASE WHEN ? THEN '' ELSE host_key END,"
+                "updated_by=?,updated_at=? WHERE id=?",
+                (
+                    name, values["host"], values["ssh_port"], values["username"], values["remote_path"],
+                    values["rsync_options"], values["interval_hours"], values["retention_days"],
+                    bool(enabled), key, encrypt_deployment_token(key) if key else "",
+                    address_changed, user["id"], now_iso(), target_id,
+                ),
+            )
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "Ein Spiegelziel mit diesem Namen existiert bereits")
+    audit(request, "mirror.update", name, f"host={values['host']}", user_id=user["id"])
+    message = "Spiegelziel gespeichert"
+    if address_changed:
+        message += "; die Adresse hat sich geändert, bitte den Hostschlüssel neu abrufen"
+    return RedirectResponse(f"/mirrors/{target_id}?message={quote(message)}", status_code=303)
+
+
+@app.post("/mirrors/{target_id}/host-key")
+def mirror_host_key(request: Request, target_id: int, csrf_token: str = Form(...)):
+    """Pin the target's host key so the replication can verify it later."""
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    with db() as connection:
+        target = connection.execute("SELECT * FROM mirror_targets WHERE id=?", (target_id,)).fetchone()
+    if not target:
+        raise HTTPException(404)
+    process = subprocess.run(
+        ["/usr/bin/ssh-keyscan", "-T", "15", "-p", str(int(target["ssh_port"])),
+         "-t", "ed25519,rsa,ecdsa", str(target["host"])],
+        capture_output=True, text=True, errors="replace", timeout=45, check=False,
+    )
+    try:
+        host_key = mirror_module.normalized_host_key(
+            process.stdout, str(target["host"]), int(target["ssh_port"])
+        )
+    except ValueError as exc:
+        detail = (process.stderr or "").strip()[-300:]
+        raise HTTPException(502, f"Hostschluessel konnte nicht gelesen werden: {exc}. {detail}") from exc
+    with db() as connection:
+        connection.execute(
+            "UPDATE mirror_targets SET host_key=?,updated_by=?,updated_at=? WHERE id=?",
+            (host_key, user["id"], now_iso(), target_id),
+        )
+    fingerprints = " · ".join(line.split()[1] + " " + line.split()[2][:24] for line in host_key.splitlines())
+    audit(request, "mirror.host_key", str(target["name"]), fingerprints[:200], user_id=user["id"])
+    return RedirectResponse(
+        f"/mirrors/{target_id}?message={quote('Hostschlüssel übernommen: ' + fingerprints[:120])}",
+        status_code=303,
+    )
+
+
+@app.post("/mirrors/{target_id}/run")
+def mirror_run_trigger(request: Request, target_id: int, csrf_token: str = Form(...)):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    run_id = enqueue_mirror_run(target_id, "manual", user["id"])
+    message = (
+        f"Replikation gestartet (Lauf #{run_id})" if run_id
+        else "Für dieses Ziel läuft bereits eine Replikation"
+    )
+    audit(request, "mirror.trigger", str(target_id), f"run_id={run_id}", user_id=user["id"])
+    return RedirectResponse(f"/mirrors/{target_id}?message={quote(message)}", status_code=303)
+
+
+@app.post("/mirrors/{target_id}/delete")
+def mirror_delete(request: Request, target_id: int, csrf_token: str = Form(...)):
+    """Forget a mirror target; the data already replicated stays on the remote."""
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    with db() as connection:
+        target = connection.execute(
+            "SELECT name FROM mirror_targets WHERE id=?", (target_id,)
+        ).fetchone()
+        if not target:
+            raise HTTPException(404)
+        if connection.execute(
+            "SELECT 1 FROM mirror_runs WHERE target_id=? AND status='running'", (target_id,)
+        ).fetchone():
+            raise HTTPException(409, "Es laeuft gerade eine Replikation auf dieses Ziel")
+        connection.execute("DELETE FROM mirror_targets WHERE id=?", (target_id,))
+    audit(request, "mirror.delete", str(target["name"]), user_id=user["id"])
+    return RedirectResponse(
+        f"/mirrors?message={quote('Spiegelziel entfernt; die replizierten Daten bleiben auf dem Zielserver')}",
+        status_code=303,
+    )
+
+
+@app.get("/mirrors/runs/{run_id}", response_class=HTMLResponse)
+def mirror_run_detail(request: Request, run_id: int):
+    require_user(request, admin=True)
+    with db() as connection:
+        run = connection.execute(
+            "SELECT r.*,t.name AS target_name,t.host,u.username AS requested_by_name FROM mirror_runs r "
+            "JOIN mirror_targets t ON t.id=r.target_id LEFT JOIN users u ON u.id=r.requested_by "
+            "WHERE r.id=?",
+            (run_id,),
+        ).fetchone()
+    if not run:
+        raise HTTPException(404)
+    return render(request, "mirror_run.html", {"run": run, "volume": format_size(run["transferred_bytes"])})
 
 
 def explorer_client(client_id: int) -> sqlite3.Row:
