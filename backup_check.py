@@ -69,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         help="Root-only Aufbewahrung je Backup-Benutzer aus den Portal-Policies",
     )
     parser.add_argument(
+        "--cleanup-only",
+        action="store_true",
+        help="Nur Cleanup fuer die im Cleanup-Override enthaltenen Benutzer ausfuehren; keine Mail senden",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Vollstaendigen Check ausfuehren und Ergebnis-Mail unabhaengig vom Alarmstatus senden",
@@ -220,7 +225,10 @@ def remove_snapshot(snapshot: Path, user_home: Path, *, dry_run: bool, timeout: 
     return logical_bytes
 
 
-def cleanup_backups(cfg: dict[str, Any], *, dry_run: bool) -> Result | None:
+def cleanup_backups(
+    cfg: dict[str, Any], *, dry_run: bool, ignore_run_hour: bool = False,
+    policy_scope_only: bool = False,
+) -> Result | None:
     cleanup = cfg.get("cleanup", {})
     policy_by_user = cleanup.get("policy_by_user", {})
     if not isinstance(policy_by_user, dict):
@@ -228,7 +236,7 @@ def cleanup_backups(cfg: dict[str, Any], *, dry_run: bool) -> Result | None:
     if not bool(cleanup.get("enabled", False)) and not policy_by_user:
         return None
     run_hour = int(cleanup.get("run_hour", 23))
-    if not dry_run and local_now().hour != run_hour:
+    if not dry_run and not ignore_run_hour and local_now().hour != run_hour:
         return None
 
     mon = cfg["monitor"]
@@ -255,6 +263,8 @@ def cleanup_backups(cfg: dict[str, Any], *, dry_run: bool) -> Result | None:
 
     users = sorted(path for path in home_root.glob(user_glob) if path.is_dir())
     for user_home in users:
+        if policy_scope_only and user_home.name not in policy_by_user:
+            continue
         policy = policy_by_user.get(user_home.name, {})
         if not isinstance(policy, dict):
             errors.append(f"{user_home}: ungueltige Cleanup-Policy")
@@ -799,6 +809,10 @@ def main() -> int:
         alerts = cfg["alerts"]
         smtp_enabled = bool(cfg["smtp"].get("enabled", True))
         hostname = socket.gethostname()
+        if args.cleanup_only and (args.force or args.check_smtp or args.send_test):
+            raise ValueError("--cleanup-only kann nicht mit Mail-/Force-Modi kombiniert werden")
+        if args.cleanup_only and not args.cleanup_json_file:
+            raise ValueError("--cleanup-only erfordert --cleanup-json-file fuer eine sichere Benutzerbegrenzung")
         if args.check_smtp:
             print(check_smtp(cfg))
             return 0
@@ -818,6 +832,19 @@ def main() -> int:
             )
             print("SMTP-Testmail wurde versendet")
             return 0
+
+        if args.cleanup_only:
+            cleanup_result = cleanup_backups(
+                cfg,
+                dry_run=args.dry_run,
+                ignore_run_hour=True,
+                policy_scope_only=True,
+            )
+            if cleanup_result is None:
+                raise RuntimeError("keine Cleanup-Policy fuer den manuellen Lauf erhalten")
+            print(format_results("Manueller Policy-Cleanup", [cleanup_result]))
+            print("CLEANUP_RESULT_JSON=" + json.dumps(asdict(cleanup_result), ensure_ascii=False))
+            return 1 if cleanup_result.status != "OK" else 0
 
         state_path = Path(str(alerts.get("state_file", "/var/lib/backup-check/state.json")))
         state = load_state(state_path)

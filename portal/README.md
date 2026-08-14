@@ -36,7 +36,7 @@ SMTP wird nach der Erstinitialisierung zentral aus der SQLite-Tabelle `smtp_sett
 
 Monitoring verwendet `/livez` für die reine Prozess-Liveness und `/readyz` für die Einsatzbereitschaft von SQLite, Tokenverschlüsselung, Ziel-Home und Agent-Assets. `/healthz` bleibt als Readiness-Alias kompatibel. Das vollständige Betriebshandbuch ist nach Anmeldung unter **Handbuch** im Portal verfügbar.
 
-Die admin-only Seite **Prozesse** zeigt die RAVEN-Dienste und internen Worker sowie die Ergebnisse der letzten Backup-Aufträge, Checker-, ACME- und Cloudflare-Prüfläufe.
+Die admin-only Seite **Prozesse** zeigt die RAVEN-Dienste und internen Worker sowie die Ergebnisse der letzten Backup-Aufträge, Checker-, Policy-Cleanup-, ACME- und Cloudflare-Prüfläufe. Pro Policy stehen eine löschfreie Vorschau und ein bestätigungspflichtiger manueller Cleanup bereit. Manuelle Läufe bleiben strikt auf die aktiven Zielkonten der gewählten Policy begrenzt und werden nicht parallel zu Checker- oder zugehörigen Backup-Läufen ausgeführt.
 
 Lokale Portalbenutzer werden im Menü **Benutzer** als `admin` oder `viewer` verwaltet. Admins dürfen Clients onboarden und Benutzer ändern; Viewer haben ausschließlich lesenden Zugriff. Passwörter werden mit scrypt, Sitzungs-, Deployment- und Agent-Tokens nur als SHA-256-Hash in `/var/lib/backup-portal/portal.db` gespeichert.
 

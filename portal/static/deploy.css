@@ -232,3 +232,7 @@
 .storage-facts small { display: block; margin-top: .15rem; }
 .storage-overview .space-bar > span { background: var(--accent2); }
 .storage-overview.storage-error .space-bar > span { background: var(--bad); }
+.cleanup-actions { display: flex; flex-wrap: wrap; gap: .75rem; align-items: flex-start; }
+.cleanup-actions form { margin: 0; }
+.cleanup-execute { display: grid; gap: .4rem; }
+.cleanup-execute .inline-check { font-size: .8rem; }

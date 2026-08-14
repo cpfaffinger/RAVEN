@@ -492,11 +492,23 @@ def init_db() -> None:
               requested_by INTEGER REFERENCES users(id), requested_at TEXT NOT NULL,
               started_at TEXT, finished_at TEXT, exit_code INTEGER, summary TEXT, output TEXT
             );
+            CREATE TABLE IF NOT EXISTS policy_cleanup_runs (
+              id INTEGER PRIMARY KEY,
+              policy_id INTEGER REFERENCES backup_policies(id) ON DELETE SET NULL,
+              policy_name TEXT NOT NULL,
+              dry_run INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL CHECK(status IN ('queued','running','success','error','interrupted')),
+              requested_by INTEGER REFERENCES users(id), requested_at TEXT NOT NULL,
+              started_at TEXT, finished_at TEXT, exit_code INTEGER,
+              reclaimed_bytes INTEGER, summary TEXT, output TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_status_client_time ON status_events(client_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(id DESC);
             CREATE INDEX IF NOT EXISTS idx_commands_client_status ON backup_commands(client_id,status,id);
             CREATE INDEX IF NOT EXISTS idx_run_logs_client_time ON backup_run_logs(client_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_checker_runs_status ON checker_runs(status,id);
+            CREATE INDEX IF NOT EXISTS idx_policy_cleanup_runs_status ON policy_cleanup_runs(status,id);
+            CREATE INDEX IF NOT EXISTS idx_policy_cleanup_runs_policy ON policy_cleanup_runs(policy_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_mirror_runs_target ON mirror_runs(target_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_mirror_runs_status ON mirror_runs(status,id);
             CREATE INDEX IF NOT EXISTS idx_cloudflare_tests_time ON cloudflare_test_runs(id DESC);
@@ -1076,6 +1088,11 @@ def enqueue_due_schedules() -> None:
             "SELECT * FROM clients WHERE active=1 AND agent_token_hash IS NOT NULL"
         ).fetchall()
         for client in clients:
+            if connection.execute(
+                "SELECT 1 FROM policy_cleanup_runs WHERE policy_id=? AND status IN ('queued','running')",
+                (client["policy_id"],),
+            ).fetchone():
+                continue
             hour, minute, interval_hours, offset = policy_schedule(connection, client["policy_id"])
             plan = backup_schedule.slot_plan(
                 local_now, hour, minute, interval_hours, offset, str(client["slug"])
@@ -1131,7 +1148,10 @@ def enqueue_checker_run(mode: str, requested_by: int | None = None) -> int | Non
         active = connection.execute(
             "SELECT id FROM checker_runs WHERE status IN ('queued','running') ORDER BY id LIMIT 1"
         ).fetchone()
-        if active:
+        cleanup_active = connection.execute(
+            "SELECT id FROM policy_cleanup_runs WHERE status IN ('queued','running') ORDER BY id LIMIT 1"
+        ).fetchone()
+        if active or cleanup_active:
             return None
         cursor = connection.execute(
             "INSERT INTO checker_runs(mode,status,requested_by,requested_at) VALUES(?,'queued',?,?)",
@@ -1155,7 +1175,10 @@ def enqueue_due_checker() -> None:
         active = connection.execute(
             "SELECT 1 FROM checker_runs WHERE status IN ('queued','running')"
         ).fetchone()
-        if not active:
+        cleanup_active = connection.execute(
+            "SELECT 1 FROM policy_cleanup_runs WHERE status IN ('queued','running')"
+        ).fetchone()
+        if not active and not cleanup_active:
             connection.execute(
                 "INSERT INTO checker_runs(mode,status,requested_at) VALUES('normal','queued',?)",
                 (now_iso(),),
@@ -1171,6 +1194,8 @@ def claim_checker_run() -> sqlite3.Row | None:
     with db() as connection:
         connection.execute("BEGIN IMMEDIATE")
         if connection.execute("SELECT 1 FROM checker_runs WHERE status='running'").fetchone():
+            return None
+        if connection.execute("SELECT 1 FROM policy_cleanup_runs WHERE status='running'").fetchone():
             return None
         run = connection.execute(
             "SELECT * FROM checker_runs WHERE status='queued' ORDER BY id LIMIT 1"
@@ -1235,6 +1260,164 @@ def checker_cleanup_policies() -> dict[str, dict[str, Any]]:
         }
         for row in rows
     }
+
+
+def enqueue_policy_cleanup_run(
+    policy_id: int, requested_by: int, *, dry_run: bool,
+) -> tuple[int | None, str]:
+    """Queue one policy-scoped cleanup while excluding checker and backup races."""
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        policy = connection.execute(
+            "SELECT id,name,retention_days,minimum_snapshots_to_keep FROM backup_policies WHERE id=?",
+            (policy_id,),
+        ).fetchone()
+        if not policy:
+            return None, "not_found"
+        client_count = int(connection.execute(
+            "SELECT COUNT(*) FROM clients WHERE policy_id=? AND active=1", (policy_id,)
+        ).fetchone()[0])
+        if client_count == 0:
+            return None, "no_clients"
+        active_maintenance = connection.execute(
+            "SELECT 1 FROM checker_runs WHERE status IN ('queued','running') UNION ALL "
+            "SELECT 1 FROM policy_cleanup_runs WHERE status IN ('queued','running') LIMIT 1"
+        ).fetchone()
+        if active_maintenance:
+            return None, "maintenance_busy"
+        active_backup = connection.execute(
+            "SELECT 1 FROM clients c WHERE c.policy_id=? AND c.active=1 AND "
+            "(c.last_event='started' OR EXISTS (SELECT 1 FROM backup_commands bc WHERE bc.client_id=c.id "
+            "AND bc.status IN ('queued','claimed','running'))) LIMIT 1",
+            (policy_id,),
+        ).fetchone()
+        if active_backup:
+            return None, "backup_active"
+        cursor = connection.execute(
+            "INSERT INTO policy_cleanup_runs(policy_id,policy_name,dry_run,status,requested_by,requested_at) "
+            "VALUES(?,?,?,'queued',?,?)",
+            (policy_id, str(policy["name"]), bool(dry_run), requested_by, now_iso()),
+        )
+        run_id = int(cursor.lastrowid)
+    CHECKER_WAKEUP.set()
+    return run_id, "queued"
+
+
+def claim_policy_cleanup_run() -> sqlite3.Row | None:
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM policy_cleanup_runs WHERE status='running'"
+        ).fetchone():
+            return None
+        if connection.execute("SELECT 1 FROM checker_runs WHERE status='running'").fetchone():
+            return None
+        run = connection.execute(
+            "SELECT * FROM policy_cleanup_runs WHERE status='queued' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not run:
+            return None
+        connection.execute(
+            "UPDATE policy_cleanup_runs SET status='running',started_at=? WHERE id=? AND status='queued'",
+            (now_iso(), run["id"]),
+        )
+        return connection.execute(
+            "SELECT * FROM policy_cleanup_runs WHERE id=?", (run["id"],)
+        ).fetchone()
+
+
+def policy_cleanup_payload(policy_id: int) -> dict[str, dict[str, Any]]:
+    """Build a strictly scoped manual cleanup map; manual execution overrides auto-disable."""
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT c.username,p.retention_days,p.minimum_snapshots_to_keep "
+            "FROM clients c JOIN backup_policies p ON p.id=c.policy_id "
+            "WHERE c.active=1 AND p.id=? ORDER BY c.username",
+            (policy_id,),
+        ).fetchall()
+    return {
+        str(row["username"]): {
+            "enabled": True,
+            "retention_days": int(row["retention_days"]),
+            "minimum_snapshots_to_keep": int(row["minimum_snapshots_to_keep"]),
+        }
+        for row in rows
+    }
+
+
+def execute_policy_cleanup_run(run: sqlite3.Row) -> None:
+    payload_path: Path | None = None
+    timeout = max(60, min(7200, int(CHECKER_CONFIG_SECTION.get("timeout_seconds", 1800))))
+    try:
+        policy_id = run["policy_id"]
+        if policy_id is None:
+            raise RuntimeError("Policy wurde vor dem Cleanup entfernt")
+        payload = policy_cleanup_payload(int(policy_id))
+        if not payload:
+            raise RuntimeError("Policy hat keine aktiven Zielkonten")
+        payload_path = write_run_payload("policy-cleanup", run, payload)
+        command = [
+            sys.executable, str(CHECKER_SCRIPT), "--config", str(CHECKER_CONFIG_PATH),
+            "--cleanup-json-file", str(payload_path), "--cleanup-only",
+        ]
+        if run["dry_run"]:
+            command.append("--dry-run")
+        process = subprocess.run(
+            command, cwd=str(CHECKER_SCRIPT.parent), capture_output=True, text=True,
+            errors="replace", timeout=timeout, check=False,
+        )
+        output = (process.stdout + ("\n" if process.stdout and process.stderr else "") + process.stderr).strip()
+        result_payload: dict[str, Any] = {}
+        for line in reversed(output.splitlines()):
+            if line.startswith("CLEANUP_RESULT_JSON="):
+                try:
+                    parsed = json.loads(line.split("=", 1)[1])
+                    if isinstance(parsed, dict):
+                        result_payload = parsed
+                except json.JSONDecodeError:
+                    pass
+                break
+        summary = str(result_payload.get("detail") or (
+            next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "")
+            or f"Cleanup endete mit Status {process.returncode}"
+        ))[:1000]
+        reclaimed = result_payload.get("volume_bytes")
+        reclaimed_bytes = int(reclaimed) if isinstance(reclaimed, int) and reclaimed >= 0 else None
+        status = "success" if process.returncode == 0 else "error"
+        with db() as connection:
+            connection.execute(
+                "UPDATE policy_cleanup_runs SET status=?,finished_at=?,exit_code=?,reclaimed_bytes=?,"
+                "summary=?,output=? WHERE id=?",
+                (status, now_iso(), process.returncode, reclaimed_bytes, summary, output[-250_000:], run["id"]),
+            )
+            connection.execute(
+                "DELETE FROM policy_cleanup_runs WHERE id IN (SELECT id FROM policy_cleanup_runs "
+                "ORDER BY id DESC LIMIT -1 OFFSET 100)"
+            )
+        if status == "success" and not run["dry_run"]:
+            STORAGE_WAKEUP.set()
+        LOG.info("Policy-Cleanup #%s beendet: %s (%s)", run["id"], status, summary)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        with db() as connection:
+            connection.execute(
+                "UPDATE policy_cleanup_runs SET status='error',finished_at=?,exit_code=124,summary=?,output=? WHERE id=?",
+                (now_iso(), f"Zeitlimit von {timeout} Sekunden überschritten", (stdout + "\n" + stderr)[-250_000:], run["id"]),
+            )
+    except Exception as exc:
+        with db() as connection:
+            connection.execute(
+                "UPDATE policy_cleanup_runs SET status='error',finished_at=?,exit_code=2,summary=?,output='' WHERE id=?",
+                (now_iso(), f"{type(exc).__name__}: {exc}"[:1000], run["id"]),
+            )
+        LOG.exception("Policy-Cleanup #%s konnte nicht ausgeführt werden", run["id"])
+    finally:
+        if payload_path:
+            try:
+                payload_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def execute_checker_run(run: sqlite3.Row) -> None:
@@ -1743,6 +1926,10 @@ def checker_loop() -> None:
     while not CHECKER_STOP.is_set():
         try:
             enqueue_due_checker()
+            cleanup_run = claim_policy_cleanup_run()
+            if cleanup_run:
+                execute_policy_cleanup_run(cleanup_run)
+                continue
             run = claim_checker_run()
             if run:
                 execute_checker_run(run)
@@ -1773,6 +1960,11 @@ def startup() -> None:
         connection.execute(
             "UPDATE checker_runs SET status='interrupted',finished_at=?,summary='Portal wurde waehrend des Laufs beendet' "
             "WHERE status='running'",
+            (now_iso(),),
+        )
+        connection.execute(
+            "UPDATE policy_cleanup_runs SET status='interrupted',finished_at=?,"
+            "summary='Portal wurde waehrend des Laufs beendet' WHERE status='running'",
             (now_iso(),),
         )
         connection.execute(
@@ -2207,7 +2399,7 @@ def processes_page(request: Request):
                 "name": "Checker-Worker", "kind": "Portal-Thread",
                 "status": "success" if CHECKER_THREAD and CHECKER_THREAD.is_alive() else "failure",
                 "result": "läuft" if CHECKER_THREAD and CHECKER_THREAD.is_alive() else "gestoppt",
-                "started_at": "Portalstart", "finished_at": "", "details": "Checker-Warteschlange",
+                "started_at": "Portalstart", "finished_at": "", "details": "Checker- und Policy-Cleanup-Warteschlange",
             },
             {
                 "name": "Spiegel-Worker", "kind": "Portal-Thread",
@@ -2234,6 +2426,25 @@ def processes_page(request: Request):
             "SELECT cr.*,u.username AS requested_by_name FROM checker_runs cr "
             "LEFT JOIN users u ON u.id=cr.requested_by ORDER BY cr.id DESC LIMIT 30"
         ).fetchall()]
+        cleanup_runs = [dict(row) for row in connection.execute(
+            "SELECT pr.*,u.username AS requested_by_name FROM policy_cleanup_runs pr "
+            "LEFT JOIN users u ON u.id=pr.requested_by ORDER BY pr.id DESC LIMIT 30"
+        ).fetchall()]
+        policies = [dict(row) for row in connection.execute(
+            "SELECT p.*,COUNT(c.id) AS client_count FROM backup_policies p "
+            "LEFT JOIN clients c ON c.policy_id=p.id AND c.active=1 "
+            "GROUP BY p.id ORDER BY p.name"
+        ).fetchall()]
+        blocked_by_policy = {
+            int(row["policy_id"]): int(row["blocked_count"])
+            for row in connection.execute(
+                "SELECT c.policy_id,COUNT(DISTINCT c.id) AS blocked_count FROM clients c "
+                "LEFT JOIN backup_commands bc ON bc.client_id=c.id "
+                "AND bc.status IN ('queued','claimed','running') "
+                "WHERE c.active=1 AND (c.last_event='started' OR bc.id IS NOT NULL) GROUP BY c.policy_id"
+            ).fetchall()
+            if row["policy_id"] is not None
+        }
         cloudflare_tests = [dict(row) for row in connection.execute(
             "SELECT ct.*,u.username AS requested_by_name FROM cloudflare_test_runs ct "
             "LEFT JOIN users u ON u.id=ct.requested_by ORDER BY ct.id DESC LIMIT 20"
@@ -2241,6 +2452,17 @@ def processes_page(request: Request):
         clients = [dict(row) for row in connection.execute(
             "SELECT slug,last_poll_at,last_event,last_event_at FROM clients WHERE active=1 ORDER BY slug"
         ).fetchall()]
+    latest_cleanup_by_policy: dict[int, dict[str, Any]] = {}
+    for cleanup_run in cleanup_runs:
+        cleanup_run["reclaimed_size"] = format_size(cleanup_run.get("reclaimed_bytes"))
+        policy_id = cleanup_run.get("policy_id")
+        if policy_id is not None and int(policy_id) not in latest_cleanup_by_policy:
+            latest_cleanup_by_policy[int(policy_id)] = cleanup_run
+    cleanup_busy = any(run["status"] in {"queued", "running"} for run in cleanup_runs)
+    cleanup_busy = cleanup_busy or any(run["status"] in {"queued", "running"} for run in checker_runs)
+    for policy in policies:
+        policy["blocked_count"] = blocked_by_policy.get(int(policy["id"]), 0)
+        policy["latest_cleanup"] = latest_cleanup_by_policy.get(int(policy["id"]))
     online = 0
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
     for client in clients:
@@ -2258,13 +2480,66 @@ def processes_page(request: Request):
             "managed": managed,
             "commands": commands,
             "checker_runs": checker_runs,
+            "cleanup_runs": cleanup_runs,
+            "policies": policies,
+            "cleanup_busy": cleanup_busy,
             "cloudflare_tests": cloudflare_tests,
             "acme_job": read_acme_state("job.json"),
             "online_agents": online,
             "agent_count": len(clients),
             "generated_at": now_iso(),
+            "message": request.query_params.get("message", ""),
         },
     )
+
+
+@app.post("/processes/cleanup/{policy_id}")
+def policy_cleanup_trigger(
+    request: Request,
+    policy_id: int,
+    mode: str = Form(...),
+    confirmed: str | None = Form(None),
+    csrf_token: str = Form(...),
+):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    if mode not in {"execute", "dry_run"}:
+        raise HTTPException(400, "Ungültiger Cleanup-Modus")
+    if mode == "execute" and confirmed != "yes":
+        raise HTTPException(400, "Der löschende Cleanup-Lauf muss ausdrücklich bestätigt werden")
+    run_id, result = enqueue_policy_cleanup_run(
+        policy_id, int(user["id"]), dry_run=mode == "dry_run"
+    )
+    failures = {
+        "not_found": (404, "Backup-Policy nicht gefunden"),
+        "no_clients": (409, "Der Policy sind keine aktiven Server zugewiesen"),
+        "maintenance_busy": (409, "Ein Checker- oder Cleanup-Lauf ist bereits aktiv"),
+        "backup_active": (409, "Mindestens ein Backup dieser Policy ist gerade aktiv oder eingeplant"),
+    }
+    if run_id is None:
+        status_code, message = failures.get(result, (409, "Cleanup konnte nicht eingeplant werden"))
+        raise HTTPException(status_code, message)
+    audit(
+        request, "cleanup.trigger", str(policy_id),
+        f"run_id={run_id}, mode={mode}", user_id=user["id"],
+    )
+    return RedirectResponse(f"/processes/cleanup/runs/{run_id}", status_code=303)
+
+
+@app.get("/processes/cleanup/runs/{run_id}", response_class=HTMLResponse)
+def policy_cleanup_run_detail(request: Request, run_id: int):
+    require_user(request, admin=True)
+    with db() as connection:
+        run = connection.execute(
+            "SELECT pr.*,u.username AS requested_by_name FROM policy_cleanup_runs pr "
+            "LEFT JOIN users u ON u.id=pr.requested_by WHERE pr.id=?",
+            (run_id,),
+        ).fetchone()
+    if not run:
+        raise HTTPException(404, "Cleanup-Lauf nicht gefunden")
+    result = dict(run)
+    result["reclaimed_size"] = format_size(result.get("reclaimed_bytes"))
+    return render(request, "cleanup_run.html", {"run": result})
 
 
 @app.get("/certificates", response_class=HTMLResponse)
@@ -2466,6 +2741,7 @@ AUDIT_LABELS = {
     "certificate.request": "Zertifikat angefordert",
     "checker.settings": "Checker-Einstellungen geändert",
     "checker.trigger": "Checkerlauf gestartet",
+    "cleanup.trigger": "Policy-Cleanup angefordert",
     "mirror.create": "Spiegelziel angelegt",
     "mirror.delete": "Spiegelziel entfernt",
     "mirror.host_key": "Hostschlüssel gepinnt",
@@ -4435,11 +4711,17 @@ def trigger_backup(
     verify_csrf(user, csrf_token)
     forced = bool(force)
     with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         client = connection.execute("SELECT * FROM clients WHERE id=? AND active=1", (client_id,)).fetchone()
         if not client:
             raise HTTPException(404)
         if not client["agent_token_hash"]:
             raise HTTPException(409, "Client muss zuerst onboarded werden")
+        if connection.execute(
+            "SELECT 1 FROM policy_cleanup_runs WHERE policy_id=? AND status IN ('queued','running')",
+            (client["policy_id"],),
+        ).fetchone():
+            raise HTTPException(409, "Für diese Policy läuft gerade ein Cleanup")
         active = connection.execute(
             "SELECT * FROM backup_commands WHERE client_id=? AND status IN ('queued','claimed','running')",
             (client_id,),
@@ -4760,7 +5042,11 @@ async def agent_poll(request: Request):
             "WHERE client_id=? AND status='claimed' AND claimed_at<?",
             (client["id"], claimed_cutoff),
         )
-        command = connection.execute(
+        cleanup_active = connection.execute(
+            "SELECT 1 FROM policy_cleanup_runs WHERE policy_id=? AND status IN ('queued','running')",
+            (client["policy_id"],),
+        ).fetchone()
+        command = None if cleanup_active else connection.execute(
             "SELECT * FROM backup_commands WHERE client_id=? AND status='queued' ORDER BY id LIMIT 1",
             (client["id"],),
         ).fetchone()

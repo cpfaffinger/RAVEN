@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -86,6 +87,49 @@ class PolicyCleanupTests(unittest.TestCase):
                 {"monitor": {}, "cleanup": {"enabled": True, "policy_by_user": []}},
                 dry_run=True,
             )
+
+    def test_manual_cleanup_ignores_hour_but_stays_inside_policy_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selected = root / "backup_selected"
+            other = root / "backup_other"
+            selected.mkdir()
+            other.mkdir()
+            selected_old = self.completed_snapshot(selected, "20260101000000000")
+            self.completed_snapshot(selected, "20260102000000000")
+            other_old = self.completed_snapshot(other, "20260101000000000")
+            self.completed_snapshot(other, "20260102000000000")
+            config = {
+                "monitor": {
+                    "home_root": str(root), "user_glob": "backup_*",
+                    "ok_marker_name": ".backup-ok", "volume_timeout_seconds": 1,
+                },
+                "cleanup": {
+                    "enabled": True, "run_hour": 23, "snapshot_name_digits": 17,
+                    "snapshot_retention_days": 1, "minimum_snapshots_to_keep": 1,
+                    "incomplete_snapshot_retention_hours": 48,
+                    "legacy_file_retention_days": 5,
+                    "policy_by_user": {
+                        "backup_selected": {
+                            "enabled": True, "retention_days": 1,
+                            "minimum_snapshots_to_keep": 1,
+                        }
+                    },
+                },
+            }
+            fixed_now = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+            with (
+                mock.patch.object(backup_check, "local_now", return_value=fixed_now),
+                mock.patch.object(backup_check, "measure_volume_bytes", return_value=2048),
+            ):
+                self.assertIsNone(backup_check.cleanup_backups(config, dry_run=False))
+                result = backup_check.cleanup_backups(
+                    config, dry_run=False, ignore_run_hour=True, policy_scope_only=True
+                )
+
+            self.assertEqual(result.status, "OK")
+            self.assertFalse(selected_old.exists())
+            self.assertTrue(other_old.exists())
 
 
 if __name__ == "__main__":
