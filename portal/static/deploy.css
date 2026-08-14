@@ -236,3 +236,15 @@
 .cleanup-actions form { margin: 0; }
 .cleanup-execute { display: grid; gap: .4rem; }
 .cleanup-execute .inline-check { font-size: .8rem; }
+
+/* The overview carries the widest data table. Give only this page the full
+   desktop canvas; forms and detail pages keep their deliberately narrower line length. */
+body.layout-wide .shell { max-width: 1800px; }
+@media (min-width: 851px) {
+  body.layout-wide .topbar { padding-inline: max(24px, calc((100vw - 1800px) / 2)); }
+}
+@media (min-width: 1100px) {
+  .dashboard-table { min-width: 0; }
+  .dashboard-table th, .dashboard-table td { padding: 12px 14px; }
+  .dashboard-table td { overflow-wrap: anywhere; }
+}

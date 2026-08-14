@@ -15,7 +15,7 @@
   <script defer src="/static/onboarding.js"></script>
   <script defer src="/static/live-output.js"></script>
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
 {% if user %}
 <header class="topbar">
   <a class="brand" href="/" title="Recovery, Archiving, Verification, Events &amp; Notification"><span class="brand-mark">R</span><span>RAVEN</span></a>
