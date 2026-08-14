@@ -7,7 +7,7 @@ Das Portal wird als root-privilegierter, gehärteter systemd-Dienst betrieben. R
 ## Bedienung
 
 1. Als Portal-Administrator anmelden.
-2. Unter **Policies** das Sicherungsmodell anlegen: MariaDB-Datenbanken und MariaDB-Benutzer/Rechte können unabhängig aktiviert werden; Pfade werden als aktuelle `sync`-Kopie oder persistentes `tar.zst`-Archiv definiert.
+2. Unter **Policies** das Sicherungsmodell anlegen: MariaDB-Datenbanken und MariaDB-Benutzer/Rechte können unabhängig aktiviert werden; Pfade werden als aktuelle `sync`-Kopie oder persistentes `tar.zst`-Archiv definiert. Cleanup, Retention in Tagen und die unabhängig vom Alter mindestens zu behaltenden vollständigen Stände werden ebenfalls je Policy festgelegt.
 3. Unter **Neuen Server onboarden** den Client, genau eine Policy sowie Mail- und Logging-Optionen anlegen; Wunschzeit und Intervall stammen aus der Policy.
 4. In den Clientdetails „Ein-Befehl-Deployment“ auswählen und festlegen, ob direkt ein vollständiges Backup starten soll.
 5. Den angezeigten `curl`-Befehl als root auf genau diesem Quellserver ausführen.
@@ -42,7 +42,9 @@ Lokale Portalbenutzer werden im Menü **Benutzer** als `admin` oder `viewer` ver
 
 Der admin-only **Backup Explorer** durchsucht bestehende Client-Homes read-only. Er unterstützt Einzeldownloads aus normalen Dateien sowie aus `.tar`, `.tar.gz`/`.tgz` und `.tar.zst`/`.tzst`. Pfade bleiben strikt im jeweiligen Backup-Home, Symlinks werden nicht geöffnet und jeder Download wird auditiert.
 
-Der zentrale Checker läuft als eigener Worker innerhalb des Portalprozesses. Aktivierung und Intervall sowie normale, erzwungene, Dry-Run- und SMTP-Prüfungen werden unter **Checker** gesteuert. SQLite verhindert überlappende Läufe und hält die letzten 100 Ergebnisse; der frühere Checker-Cronjob wird nicht mehr benötigt.
+Der zentrale Checker läuft als eigener Worker innerhalb des Portalprozesses. Aktivierung und Intervall sowie normale, erzwungene, Dry-Run- und SMTP-Prüfungen werden unter **Checker** gesteuert. SQLite verhindert überlappende Läufe und hält die letzten 100 Ergebnisse; der frühere Checker-Cronjob wird nicht mehr benötigt. Bei jedem Lauf erhält der Checker die Cleanup-Vorgaben der aktuell zugewiesenen Policies. `current/` bleibt von der Rotation ausgenommen; globale Fristen gelten weiterhin für unvollständige und historische Legacy-Reste.
+
+Die Übersicht weist den gesamten, belegten und freien Platz des Backup-Zieldateisystems aus. Ein eigener Storage-Worker misst beim Portalstart und danach stündlich den vollständig belegten Platz jedes aktiven Client-Homes; die Werte bleiben in SQLite erhalten, sind nach Größe sortierbar und können admin-only sofort aktualisiert werden. „Letztes Backup“ und „Gesamt auf Ziel“ sind getrennte Werte.
 
 ## Relevante Dateien
 

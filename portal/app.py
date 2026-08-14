@@ -15,6 +15,7 @@ import os
 import pwd
 import re
 import secrets
+import shutil
 import sqlite3
 import stat as statlib
 import subprocess
@@ -82,6 +83,14 @@ CHECKER_THREAD: threading.Thread | None = None
 MIRROR_STOP = threading.Event()
 MIRROR_WAKEUP = threading.Event()
 MIRROR_THREAD: threading.Thread | None = None
+STORAGE_STOP = threading.Event()
+STORAGE_WAKEUP = threading.Event()
+STORAGE_THREAD: threading.Thread | None = None
+STORAGE_STATE_LOCK = threading.Lock()
+STORAGE_STATE: dict[str, Any] = {
+    "running": False, "started_at": None, "finished_at": None,
+    "measured": 0, "errors": 0, "message": "Noch keine Messung",
+}
 MIRROR_TIMEOUT_SECONDS = 21600
 MIRROR_OUTPUT_LIMIT = 250_000
 MIRROR_PUBLISH_SECONDS = 2.0
@@ -186,6 +195,40 @@ def legacy_cloudflare_credentials() -> dict[str, Any]:
         return {"api_token": values.get("dns_cloudflare_api_token", "")}
     except (FileNotFoundError, OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
         return {}
+
+
+def checker_cleanup_configuration() -> dict[str, Any]:
+    """Read non-secret cleanup/storage defaults retained in the checker TOML."""
+    defaults: dict[str, Any] = {
+        "enabled": True,
+        "run_hour": 23,
+        "snapshot_retention_days": 7,
+        "minimum_snapshots_to_keep": 2,
+        "incomplete_snapshot_retention_hours": 48,
+        "legacy_file_retention_days": 5,
+        "minimum_free_percent": 15.0,
+    }
+    try:
+        with CHECKER_CONFIG_PATH.open("rb") as handle:
+            checker_config = tomllib.load(handle)
+        cleanup = checker_config.get("cleanup", {})
+        storage = checker_config.get("storage", {})
+        if isinstance(cleanup, dict):
+            for key in (
+                "enabled", "run_hour", "snapshot_retention_days", "minimum_snapshots_to_keep",
+                "incomplete_snapshot_retention_hours", "legacy_file_retention_days",
+            ):
+                if key in cleanup:
+                    defaults[key] = cleanup[key]
+        if isinstance(storage, dict) and "minimum_free_percent" in storage:
+            defaults["minimum_free_percent"] = storage["minimum_free_percent"]
+    except (FileNotFoundError, OSError, ValueError, tomllib.TOMLDecodeError):
+        pass
+    defaults["snapshot_retention_days"] = max(1, min(3650, int(defaults["snapshot_retention_days"])))
+    defaults["minimum_snapshots_to_keep"] = max(1, min(100, int(defaults["minimum_snapshots_to_keep"])))
+    defaults["run_hour"] = max(0, min(23, int(defaults["run_hour"])))
+    defaults["minimum_free_percent"] = max(0.0, min(100.0, float(defaults["minimum_free_percent"])))
+    return defaults
 
 
 def migrate_policy_schedule(
@@ -303,6 +346,9 @@ def init_db() -> None:
               agent_config_updated_at TEXT,
               mariadb_available INTEGER NOT NULL DEFAULT 0,
               agent_script_sha256 TEXT NOT NULL DEFAULT '',
+              storage_bytes INTEGER,
+              storage_checked_at TEXT,
+              storage_error TEXT NOT NULL DEFAULT '',
               last_event TEXT, last_event_at TEXT, last_success_at TEXT,
               last_poll_at TEXT, last_payload TEXT,
               created_at TEXT NOT NULL
@@ -328,6 +374,9 @@ def init_db() -> None:
               mail_on_success INTEGER NOT NULL DEFAULT 1,
               mail_on_failure INTEGER NOT NULL DEFAULT 1,
               mail_on_skipped INTEGER NOT NULL DEFAULT 0,
+              cleanup_enabled INTEGER NOT NULL DEFAULT 1,
+              retention_days INTEGER NOT NULL DEFAULT 7,
+              minimum_snapshots_to_keep INTEGER NOT NULL DEFAULT 2,
               active INTEGER NOT NULL DEFAULT 1,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
@@ -500,6 +549,9 @@ def init_db() -> None:
             "agent_config_updated_at": "TEXT",
             "mariadb_available": "INTEGER NOT NULL DEFAULT 0",
             "agent_script_sha256": "TEXT NOT NULL DEFAULT ''",
+            "storage_bytes": "INTEGER",
+            "storage_checked_at": "TEXT",
+            "storage_error": "TEXT NOT NULL DEFAULT ''",
             "last_success_at": "TEXT",
         }
         for column, definition in client_column_defaults.items():
@@ -534,6 +586,22 @@ def init_db() -> None:
             connection.execute("UPDATE backup_policies SET mariadb_users_enabled=mariadb_enabled")
         migrate_policy_schedule(connection, policy_columns, client_columns, portal_defaults)
         migrate_policy_notifications(connection, policy_columns, client_columns)
+        cleanup_defaults = checker_cleanup_configuration()
+        if "cleanup_enabled" not in policy_columns:
+            connection.execute(
+                "ALTER TABLE backup_policies ADD COLUMN cleanup_enabled INTEGER NOT NULL DEFAULT "
+                f"{1 if cleanup_defaults['enabled'] else 0}"
+            )
+        if "retention_days" not in policy_columns:
+            connection.execute(
+                "ALTER TABLE backup_policies ADD COLUMN retention_days INTEGER NOT NULL DEFAULT "
+                f"{int(cleanup_defaults['snapshot_retention_days'])}"
+            )
+        if "minimum_snapshots_to_keep" not in policy_columns:
+            connection.execute(
+                "ALTER TABLE backup_policies ADD COLUMN minimum_snapshots_to_keep INTEGER NOT NULL DEFAULT "
+                f"{int(cleanup_defaults['minimum_snapshots_to_keep'])}"
+            )
         if "start_offset_minutes" not in policy_columns:
             connection.execute(
                 "ALTER TABLE backup_policies ADD COLUMN start_offset_minutes INTEGER NOT NULL DEFAULT 0"
@@ -946,6 +1014,9 @@ def policy_payload(connection: sqlite3.Connection, policy_id: int | None) -> dic
         "mail_on_success": bool(policy["mail_on_success"]),
         "mail_on_failure": bool(policy["mail_on_failure"]),
         "mail_on_skipped": bool(policy["mail_on_skipped"]),
+        "cleanup_enabled": bool(policy["cleanup_enabled"]),
+        "retention_days": int(policy["retention_days"]),
+        "minimum_snapshots_to_keep": int(policy["minimum_snapshots_to_keep"]),
         "paths": [dict(row) for row in paths],
     }
 
@@ -1149,6 +1220,23 @@ def checker_alert_settings() -> dict[str, Any]:
     }
 
 
+def checker_cleanup_policies() -> dict[str, dict[str, Any]]:
+    """Return retention settings per isolated backup target account."""
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT c.username,p.cleanup_enabled,p.retention_days,p.minimum_snapshots_to_keep "
+            "FROM clients c JOIN backup_policies p ON p.id=c.policy_id WHERE c.active=1"
+        ).fetchall()
+    return {
+        str(row["username"]): {
+            "enabled": bool(row["cleanup_enabled"]),
+            "retention_days": int(row["retention_days"]),
+            "minimum_snapshots_to_keep": int(row["minimum_snapshots_to_keep"]),
+        }
+        for row in rows
+    }
+
+
 def execute_checker_run(run: sqlite3.Row) -> None:
     flags = {
         "normal": ["--verbose"],
@@ -1166,6 +1254,8 @@ def execute_checker_run(run: sqlite3.Row) -> None:
         payload_paths.append(schedule_path)
         alerts_path = write_run_payload("alerts", run, checker_alert_settings())
         payload_paths.append(alerts_path)
+        cleanup_path = write_run_payload("cleanup", run, checker_cleanup_policies())
+        payload_paths.append(cleanup_path)
         command = [
             sys.executable,
             str(CHECKER_SCRIPT),
@@ -1177,6 +1267,8 @@ def execute_checker_run(run: sqlite3.Row) -> None:
             str(schedule_path),
             "--alerts-json-file",
             str(alerts_path),
+            "--cleanup-json-file",
+            str(cleanup_path),
             *flags[str(run["mode"])],
         ]
         process = subprocess.run(
@@ -1547,6 +1639,106 @@ def mirror_loop() -> None:
         MIRROR_WAKEUP.clear()
 
 
+def measure_client_storage(client: sqlite3.Row) -> int:
+    """Measure allocated bytes below one direct, non-symlinked backup home."""
+    root = HOME_ROOT.resolve(strict=True)
+    home = Path(str(client["home_path"]))
+    metadata = home.lstat()
+    if statlib.S_ISLNK(metadata.st_mode) or not statlib.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("Backup-Home ist kein direktes Verzeichnis")
+    if home.parent.resolve(strict=True) != root or home.name != str(client["username"]):
+        raise RuntimeError("Backup-Home liegt nicht direkt unter dem Home-Root")
+    process = subprocess.run(
+        ["/usr/bin/du", "--summarize", "--block-size=1", "--one-file-system", "--", str(home)],
+        capture_output=True, text=True, errors="replace", timeout=600, check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError((process.stderr or f"du endete mit Status {process.returncode}").strip()[:500])
+    try:
+        return int(process.stdout.split(maxsplit=1)[0])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError("Ungültige du-Ausgabe") from exc
+
+
+def refresh_client_storage() -> None:
+    started_at = now_iso()
+    with STORAGE_STATE_LOCK:
+        STORAGE_STATE.update(
+            {"running": True, "started_at": started_at, "measured": 0, "errors": 0, "message": "Messung läuft"}
+        )
+    measured = 0
+    errors = 0
+    with db() as connection:
+        clients = connection.execute(
+            "SELECT id,username,home_path FROM clients WHERE active=1 ORDER BY username"
+        ).fetchall()
+    for client in clients:
+        if STORAGE_STOP.is_set():
+            break
+        checked_at = now_iso()
+        try:
+            storage_bytes = measure_client_storage(client)
+            with db() as connection:
+                connection.execute(
+                    "UPDATE clients SET storage_bytes=?,storage_checked_at=?,storage_error='' WHERE id=?",
+                    (storage_bytes, checked_at, client["id"]),
+                )
+            measured += 1
+        except Exception as exc:
+            with db() as connection:
+                connection.execute(
+                    "UPDATE clients SET storage_checked_at=?,storage_error=? WHERE id=?",
+                    (checked_at, f"{type(exc).__name__}: {exc}"[:500], client["id"]),
+                )
+            errors += 1
+            LOG.warning("Speichermessung für %s fehlgeschlagen: %s", client["username"], exc)
+    finished_at = now_iso()
+    with STORAGE_STATE_LOCK:
+        STORAGE_STATE.update(
+            {
+                "running": False, "finished_at": finished_at, "measured": measured, "errors": errors,
+                "message": f"{measured} Homes gemessen, {errors} Fehler",
+            }
+        )
+
+
+def storage_loop() -> None:
+    while not STORAGE_STOP.is_set():
+        try:
+            refresh_client_storage()
+        except Exception:
+            LOG.exception("Storage-Worker fehlgeschlagen")
+            with STORAGE_STATE_LOCK:
+                STORAGE_STATE.update({"running": False, "finished_at": now_iso(), "message": "Worker-Fehler"})
+        STORAGE_WAKEUP.wait(3600)
+        STORAGE_WAKEUP.clear()
+
+
+def storage_worker_state() -> dict[str, Any]:
+    with STORAGE_STATE_LOCK:
+        return dict(STORAGE_STATE)
+
+
+def backup_target_storage() -> dict[str, Any]:
+    usage = shutil.disk_usage(HOME_ROOT)
+    used = usage.total - usage.free
+    free_percent = usage.free / usage.total * 100 if usage.total else 0.0
+    threshold = float(checker_cleanup_configuration()["minimum_free_percent"])
+    return {
+        "path": str(HOME_ROOT),
+        "total_bytes": usage.total,
+        "used_bytes": used,
+        "free_bytes": usage.free,
+        "total": format_size(usage.total),
+        "used": format_size(used),
+        "free": format_size(usage.free),
+        "free_percent": round(free_percent, 1),
+        "used_percent": round(100.0 - free_percent, 1),
+        "minimum_free_percent": threshold,
+        "status": "ok" if free_percent >= threshold else "error",
+    }
+
+
 def checker_loop() -> None:
     while not CHECKER_STOP.is_set():
         try:
@@ -1571,7 +1763,7 @@ def scheduler_loop() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    global SCHEDULER_THREAD, CHECKER_THREAD, MIRROR_THREAD
+    global SCHEDULER_THREAD, CHECKER_THREAD, MIRROR_THREAD, STORAGE_THREAD
     init_db()
     imported = import_existing_clients()
     if imported:
@@ -1600,6 +1792,10 @@ def startup() -> None:
     discard_stale_mirror_credentials()
     MIRROR_THREAD = threading.Thread(target=mirror_loop, name="mirror-worker", daemon=True)
     MIRROR_THREAD.start()
+    STORAGE_STOP.clear()
+    STORAGE_WAKEUP.clear()
+    STORAGE_THREAD = threading.Thread(target=storage_loop, name="storage-worker", daemon=True)
+    STORAGE_THREAD.start()
 
 
 @app.on_event("shutdown")
@@ -1609,12 +1805,16 @@ def shutdown() -> None:
     CHECKER_WAKEUP.set()
     MIRROR_STOP.set()
     MIRROR_WAKEUP.set()
+    STORAGE_STOP.set()
+    STORAGE_WAKEUP.set()
     if SCHEDULER_THREAD:
         SCHEDULER_THREAD.join(timeout=5)
     if CHECKER_THREAD:
         CHECKER_THREAD.join(timeout=5)
     if MIRROR_THREAD:
         MIRROR_THREAD.join(timeout=5)
+    if STORAGE_THREAD:
+        STORAGE_THREAD.join(timeout=5)
 
 
 @app.get("/livez")
@@ -1647,6 +1847,7 @@ def readiness_result() -> tuple[bool, dict[str, Any]]:
     checks["checker_state_available"] = CHECKER_STATE.is_file() and os.access(CHECKER_STATE, os.R_OK)
     checks["scheduler"] = bool(SCHEDULER_THREAD and SCHEDULER_THREAD.is_alive())
     checks["mirror_worker"] = bool(MIRROR_THREAD and MIRROR_THREAD.is_alive())
+    checks["storage_worker"] = bool(STORAGE_THREAD and STORAGE_THREAD.is_alive())
     checks["checker_script"] = CHECKER_SCRIPT.is_file() and os.access(CHECKER_SCRIPT, os.R_OK)
     checks["checker_config"] = CHECKER_CONFIG_PATH.is_file() and os.access(CHECKER_CONFIG_PATH, os.R_OK)
     checks["checker_worker"] = bool(CHECKER_THREAD and CHECKER_THREAD.is_alive())
@@ -1661,7 +1862,7 @@ def readiness_result() -> tuple[bool, dict[str, Any]]:
             checks["cloudflare_token_error"] = type(exc).__name__
     critical = [
         "database", "backup_script", "bootstrap_script", "home_root", "token_encryption",
-        "scheduler", "checker_script", "checker_config", "checker_worker", "mirror_worker",
+        "scheduler", "checker_script", "checker_config", "checker_worker", "mirror_worker", "storage_worker",
     ]
     if ACME_CONFIG.get("mode") in {"dns-manual", "dns-cloudflare"}:
         critical.append("acme_dns_hook")
@@ -2014,6 +2215,14 @@ def processes_page(request: Request):
                 "result": "läuft" if MIRROR_THREAD and MIRROR_THREAD.is_alive() else "gestoppt",
                 "started_at": "Portalstart", "finished_at": "", "details": "Replikation auf Spiegelserver",
             },
+            {
+                "name": "Storage-Worker", "kind": "Portal-Thread",
+                "status": "success" if STORAGE_THREAD and STORAGE_THREAD.is_alive() else "failure",
+                "result": "läuft" if STORAGE_THREAD and STORAGE_THREAD.is_alive() else "gestoppt",
+                "started_at": storage_worker_state().get("started_at") or "Portalstart",
+                "finished_at": storage_worker_state().get("finished_at") or "",
+                "details": storage_worker_state().get("message") or "Backup-Home-Messung",
+            },
         ]
     )
     with db() as connection:
@@ -2283,6 +2492,7 @@ AUDIT_LABELS = {
     "policy.path_add": "Pfadregel ergänzt",
     "policy.path_delete": "Pfadregel entfernt",
     "policy.update": "Policy geändert",
+    "storage.refresh": "Speichermessung angefordert",
     "portal.settings": "Portal-Konfiguration geändert",
     "smtp.settings": "SMTP-Einstellungen geändert",
     "user.create": "Benutzer angelegt",
@@ -2462,12 +2672,15 @@ def dashboard(
     request: Request, sort: str = "server", direction: str = "asc", activity: str = "all"
 ):
     require_user(request)
-    sort = sort if sort in {"server", "volume", "agent"} else "server"
+    sort = sort if sort in {"server", "volume", "storage", "agent"} else "server"
     activity = activity if activity in ACTIVITY_KINDS else "all"
     direction = direction if direction in {"asc", "desc"} else "asc"
     checks = checker_results()
     with db() as connection:
-        clients = [dict(row) for row in connection.execute("SELECT * FROM clients ORDER BY slug").fetchall()]
+        clients = [dict(row) for row in connection.execute(
+            "SELECT c.*,p.name AS policy_name,p.cleanup_enabled,p.retention_days,p.minimum_snapshots_to_keep "
+            "FROM clients c LEFT JOIN backup_policies p ON p.id=c.policy_id ORDER BY c.slug"
+        ).fetchall()]
     try:
         current_script_digest = agent_script_asset()[0]
     except OSError:
@@ -2512,12 +2725,30 @@ def dashboard(
         client["volume_bytes"] = volume_bytes
         client["volume"] = format_size(volume_bytes)
         client["volume_source"] = volume_source if volume_bytes is not None else "Noch keine Messung"
+        client["storage"] = format_size(client.get("storage_bytes"))
+        if client.get("storage_error"):
+            client["storage_hint"] = f"Messfehler: {client['storage_error']}"
+        elif client.get("storage_checked_at"):
+            client["storage_hint"] = f"Gesamtes Backup-Home · Stand {client['storage_checked_at']}"
+        else:
+            client["storage_hint"] = "Messung läuft im Hintergrund"
+        client["retention"] = (
+            f"{int(client['retention_days'])} Tage · mindestens {int(client['minimum_snapshots_to_keep'])}"
+            if client.get("cleanup_enabled") else "Cleanup deaktiviert"
+        )
         counts[status if status in counts else "UNKNOWN"] += 1
     if sort == "volume":
         known = [client for client in clients if client["volume_bytes"] is not None]
         unknown = [client for client in clients if client["volume_bytes"] is None]
         known.sort(key=lambda client: client["slug"])
         known.sort(key=lambda client: client["volume_bytes"], reverse=direction == "desc")
+        unknown.sort(key=lambda client: client["slug"])
+        clients = known + unknown
+    elif sort == "storage":
+        known = [client for client in clients if client.get("storage_bytes") is not None]
+        unknown = [client for client in clients if client.get("storage_bytes") is None]
+        known.sort(key=lambda client: client["slug"])
+        known.sort(key=lambda client: int(client["storage_bytes"]), reverse=direction == "desc")
         unknown.sort(key=lambda client: client["slug"])
         clients = known + unknown
     elif sort == "agent":
@@ -2537,9 +2768,23 @@ def dashboard(
             "direction": direction,
             "activity": activity,
             "activity_entries": activity_feed(activity),
+            "target_storage": backup_target_storage(),
+            "storage_worker": storage_worker_state(),
             "message": request.query_params.get("message", ""),
         },
     )
+
+
+@app.post("/storage/refresh")
+def storage_refresh(request: Request, csrf_token: str = Form(...)):
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    state = storage_worker_state()
+    if not state.get("running"):
+        STORAGE_WAKEUP.set()
+    audit(request, "storage.refresh", str(HOME_ROOT), "requested", user_id=user["id"])
+    message = "Speichermessung läuft bereits" if state.get("running") else "Speichermessung wurde angefordert"
+    return RedirectResponse(f"/?message={quote(message)}", status_code=303)
 
 
 @app.get("/checker", response_class=HTMLResponse)
@@ -2565,6 +2810,7 @@ def checker_page(request: Request):
         if CHECKER_STATE.is_file() else None,
         "script_path": str(CHECKER_SCRIPT),
         "config_path": str(CHECKER_CONFIG_PATH),
+        "cleanup": checker_cleanup_configuration(),
     })
 
 
@@ -3525,6 +3771,21 @@ def validated_schedule(
         raise HTTPException(400, str(exc) or "Ungueltiger Zeitplan") from exc
 
 
+def validated_retention(
+    cleanup_enabled: str | None, retention_days: Any, minimum_snapshots_to_keep: Any
+) -> tuple[bool, int, int]:
+    try:
+        days = int(retention_days)
+        minimum = int(minimum_snapshots_to_keep)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Ungültige Aufbewahrung") from exc
+    if not 1 <= days <= 3650:
+        raise HTTPException(400, "Aufbewahrung muss zwischen 1 und 3650 Tagen liegen")
+    if not 1 <= minimum <= 100:
+        raise HTTPException(400, "Mindestens zu behaltende Backups müssen zwischen 1 und 100 liegen")
+    return bool(cleanup_enabled), days, minimum
+
+
 def validated_policy_path(source_path: str, target_name: str, mode: str) -> tuple[str, str, str]:
     source_path = source_path.strip().rstrip("/") or "/"
     target_name = target_name.strip().lower()
@@ -3563,6 +3824,7 @@ def policies_page(request: Request):
             "mail_summaries": {policy["id"]: policy_mail_summary(policy) for policy in policies},
             "interval_choices": backup_schedule.INTERVAL_CHOICES,
             "defaults": defaults,
+            "cleanup_defaults": checker_cleanup_configuration(),
             "message": request.query_params.get("message", ""),
         },
     )
@@ -3582,6 +3844,9 @@ def policy_create(
     mail_on_success: str | None = Form(None),
     mail_on_failure: str | None = Form(None),
     mail_on_skipped: str | None = Form(None),
+    cleanup_enabled: str | None = Form(None),
+    retention_days: int = Form(7),
+    minimum_snapshots_to_keep: int = Form(2),
     csrf_token: str = Form(...),
 ):
     user = require_user(request, admin=True)
@@ -3592,6 +3857,9 @@ def policy_create(
     schedule_hour, schedule_minute, interval_hours, start_offset_minutes = validated_schedule(
         schedule_hour, schedule_minute, interval_hours, start_offset_minutes
     )
+    cleanup_enabled_value, retention_days, minimum_snapshots_to_keep = validated_retention(
+        cleanup_enabled, retention_days, minimum_snapshots_to_keep
+    )
     try:
         with db() as connection:
             databases_enabled = bool(mariadb_databases_enabled)
@@ -3599,12 +3867,14 @@ def policy_create(
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
                 "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
-                "mail_on_success,mail_on_failure,mail_on_skipped,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "mail_on_success,mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,"
+                "minimum_snapshots_to_keep,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
                  start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
-                 bool(mail_on_skipped), now_iso(), now_iso()),
+                 bool(mail_on_skipped), cleanup_enabled_value, retention_days,
+                 minimum_snapshots_to_keep, now_iso(), now_iso()),
             )
             policy_id = cursor.lastrowid
     except sqlite3.IntegrityError:
@@ -3645,6 +3915,7 @@ def policy_detail(request: Request, policy_id: int):
             ),
             "next_slot": following,
             "copy_name": copy_name,
+            "cleanup_defaults": checker_cleanup_configuration(),
             "message": request.query_params.get("message", ""),
         },
     )
@@ -3665,6 +3936,9 @@ def policy_update(
     mail_on_success: str | None = Form(None),
     mail_on_failure: str | None = Form(None),
     mail_on_skipped: str | None = Form(None),
+    cleanup_enabled: str | None = Form(None),
+    retention_days: int = Form(7),
+    minimum_snapshots_to_keep: int = Form(2),
     csrf_token: str = Form(...),
 ):
     user = require_user(request, admin=True)
@@ -3674,6 +3948,9 @@ def policy_update(
         raise HTTPException(400, "Policy-Name muss 3 bis 80 Zeichen lang sein")
     schedule_hour, schedule_minute, interval_hours, start_offset_minutes = validated_schedule(
         schedule_hour, schedule_minute, interval_hours, start_offset_minutes
+    )
+    cleanup_enabled_value, retention_days, minimum_snapshots_to_keep = validated_retention(
+        cleanup_enabled, retention_days, minimum_snapshots_to_keep
     )
     try:
         with db() as connection:
@@ -3685,11 +3962,13 @@ def policy_update(
                 "UPDATE backup_policies SET name=?,description=?,mariadb_enabled=?,"
                 "mariadb_databases_enabled=?,mariadb_users_enabled=?,schedule_hour=?,schedule_minute=?,"
                 "interval_hours=?,start_offset_minutes=?,mail_on_success=?,mail_on_failure=?,"
-                "mail_on_skipped=?,updated_at=? WHERE id=?",
+                "mail_on_skipped=?,cleanup_enabled=?,retention_days=?,minimum_snapshots_to_keep=?,"
+                "updated_at=? WHERE id=?",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
                  start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
-                 bool(mail_on_skipped), now_iso(), policy_id),
+                 bool(mail_on_skipped), cleanup_enabled_value, retention_days,
+                 minimum_snapshots_to_keep, now_iso(), policy_id),
             )
             connection.execute(
                 "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE policy_id=?",
@@ -3741,10 +4020,12 @@ def policy_duplicate(
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
                 "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
-                "mail_on_success,mail_on_failure,mail_on_skipped,active,created_at,updated_at) "
+                "mail_on_success,mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,"
+                "minimum_snapshots_to_keep,active,created_at,updated_at) "
                 "SELECT ?,description,mariadb_enabled,mariadb_databases_enabled,mariadb_users_enabled,"
                 "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,mail_on_success,"
-                "mail_on_failure,mail_on_skipped,active,?,? FROM backup_policies WHERE id=?",
+                "mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,minimum_snapshots_to_keep,"
+                "active,?,? FROM backup_policies WHERE id=?",
                 (new_name, now_iso(), now_iso(), policy_id),
             )
             new_id = int(cursor.lastrowid)
@@ -4008,6 +4289,13 @@ def client_detail(request: Request, client_id: int):
             "policy": dict(policy) if policy else None,
             "policy_paths": policy_paths,
             "policy_mail_summary": policy_mail_summary(policy) if policy else "unbekannt",
+            "retention_summary": (
+                f"{int(policy['retention_days'])} Tage; mindestens {int(policy['minimum_snapshots_to_keep'])} Stände"
+                if policy and policy["cleanup_enabled"] else "Cleanup deaktiviert"
+            ),
+            "storage_size": format_size(client["storage_bytes"]),
+            "storage_checked_at": client["storage_checked_at"],
+            "storage_error": client["storage_error"],
             "policies": policies,
             "schedule": schedule_state,
             "account_exists": system_account_exists(client["username"]),

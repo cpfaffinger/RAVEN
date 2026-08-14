@@ -55,6 +55,8 @@ legacy_file_retention_days = 5
 legacy_file_patterns = ["*.tgz", "*.gz", "*.pst", "*.sql"]
 delete_empty_directories = true
 snapshot_name_digits = 17
+# Standalone-Standardwerte. Das Portal übergibt für registrierte Zielkonten
+# die Retention und Mindestanzahl aus der jeweils zugewiesenen Policy.
 snapshot_retention_days = 7
 incomplete_snapshot_retention_hours = 48
 minimum_snapshots_to_keep = 2

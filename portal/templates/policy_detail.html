@@ -18,6 +18,12 @@
       </div>
     </div>
     <div class="form-block">
+      <div><p class="eyebrow">Aufbewahrung</p><h2>Retention und Cleanup</h2><p class="muted">Entfernt ausschließlich vollständige datierte Backup-Ordner dieser Policy, sobald sie älter als die Frist sind. Die Mindestanzahl wird unabhängig vom Alter behalten; <code>current/</code> bleibt immer erhalten.</p></div>
+      <div class="form-grid"><label>Retention in Tagen<small>Alter ab Abschlussmarkierung <code>.backup-ok</code></small><input type="number" name="retention_days" min="1" max="3650" value="{{ policy.retention_days }}" required></label><label>Mindestens behaltene Stände<small>Schützt die neuesten vollständigen Backups auch nach Ablauf der Frist</small><input type="number" name="minimum_snapshots_to_keep" min="1" max="100" value="{{ policy.minimum_snapshots_to_keep }}" required></label></div>
+      <div class="checks"><label><input type="checkbox" name="cleanup_enabled" {% if policy.cleanup_enabled %}checked{% endif %}> Automatisches Cleanup für diese Policy aktiv</label></div>
+      <p class="muted">Zusätzlich werden bei aktivem Cleanup unvollständige Läufe nach {{ cleanup_defaults.incomplete_snapshot_retention_hours }} Stunden und historische Legacy-Dateien nach {{ cleanup_defaults.legacy_file_retention_days }} Tagen bereinigt. Der Cleanup-Lauf ist für {{ '%02d:00'|format(cleanup_defaults.run_hour) }} geplant.</p>
+    </div>
+    <div class="form-block">
       <div><p class="eyebrow">Benachrichtigungen</p><h2>Mail bei welchen Ereignissen</h2><p class="muted">Gilt für die Agenten aller zugewiesenen Server. Empfänger sind die Portal-Benutzer mit aktivierter Mailoption; ist SMTP deaktiviert, versendet der Agent unabhängig davon nichts.</p></div>
       <div class="checks"><label><input type="checkbox" name="mail_on_success" {% if policy.mail_on_success %}checked{% endif %}> Mail bei erfolgreichem Backup <small>Abschlussbericht mit Volumen, Dauer und Klassifizierungen</small></label><label><input type="checkbox" name="mail_on_failure" {% if policy.mail_on_failure %}checked{% endif %}> Mail bei fehlgeschlagenem Backup <small>Phase, Fehlerklasse und Meldung des abgebrochenen Laufs</small></label><label><input type="checkbox" name="mail_on_skipped" {% if policy.mail_on_skipped %}checked{% endif %}> Mail bei abgelehntem Backup <small>Der Agent hat einen Auftrag abgelehnt, weil das Intervall noch nicht abgelaufen war</small></label></div>
     </div>

@@ -65,6 +65,10 @@ def parse_args() -> argparse.Namespace:
         help="Root-only Mailausloeser des Checkers aus dem Portal",
     )
     parser.add_argument(
+        "--cleanup-json-file",
+        help="Root-only Aufbewahrung je Backup-Benutzer aus den Portal-Policies",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Vollstaendigen Check ausfuehren und Ergebnis-Mail unabhaengig vom Alarmstatus senden",
@@ -88,6 +92,7 @@ def load_config(
     smtp_json_file: str | None = None,
     schedule_json_file: str | None = None,
     alerts_json_file: str | None = None,
+    cleanup_json_file: str | None = None,
 ) -> dict[str, Any]:
     with open(path, "rb") as handle:
         cfg = tomllib.load(handle)
@@ -104,6 +109,11 @@ def load_config(
         merged = {str(user): float(hours) for user, hours in portal_ages.items()}
         merged.update(dict(monitor.get("max_age_hours_by_user", {})))
         monitor["max_age_hours_by_user"] = merged
+    if cleanup_json_file:
+        cleanup = cfg.setdefault("cleanup", {})
+        cleanup["policy_by_user"] = read_json_override(
+            cleanup_json_file, "Cleanup-Override-Datei"
+        )
     for section in ("monitor", "smtp", "alerts"):
         if section not in cfg:
             raise ValueError(f"Konfigurationsabschnitt [{section}] fehlt")
@@ -212,7 +222,10 @@ def remove_snapshot(snapshot: Path, user_home: Path, *, dry_run: bool, timeout: 
 
 def cleanup_backups(cfg: dict[str, Any], *, dry_run: bool) -> Result | None:
     cleanup = cfg.get("cleanup", {})
-    if not bool(cleanup.get("enabled", False)):
+    policy_by_user = cleanup.get("policy_by_user", {})
+    if not isinstance(policy_by_user, dict):
+        raise ValueError("cleanup.policy_by_user muss ein Objekt sein")
+    if not bool(cleanup.get("enabled", False)) and not policy_by_user:
         return None
     run_hour = int(cleanup.get("run_hour", 23))
     if not dry_run and local_now().hour != run_hour:
@@ -223,15 +236,14 @@ def cleanup_backups(cfg: dict[str, Any], *, dry_run: bool) -> Result | None:
     user_glob = str(mon.get("user_glob", "backup_*"))
     marker_name = str(mon.get("ok_marker_name", ".backup-ok"))
     digit_count = int(cleanup.get("snapshot_name_digits", 17))
-    snapshot_days = float(cleanup.get("snapshot_retention_days", 7))
+    default_snapshot_days = float(cleanup.get("snapshot_retention_days", 7))
     incomplete_hours = float(cleanup.get("incomplete_snapshot_retention_hours", 48))
-    minimum_keep = int(cleanup.get("minimum_snapshots_to_keep", 2))
+    default_minimum_keep = int(cleanup.get("minimum_snapshots_to_keep", 2))
     legacy_days = float(cleanup.get("legacy_file_retention_days", 5))
     legacy_patterns = list(cleanup.get("legacy_file_patterns", ["*.tgz", "*.gz", "*.pst", "*.sql"]))
     delete_empty = bool(cleanup.get("delete_empty_directories", True))
     timeout = float(mon.get("volume_timeout_seconds", 300))
     now_epoch = local_now().timestamp()
-    snapshot_cutoff = now_epoch - snapshot_days * 86400
     incomplete_cutoff = now_epoch - incomplete_hours * 3600
     legacy_cutoff = now_epoch - legacy_days * 86400
     removed_snapshots = 0
@@ -243,6 +255,19 @@ def cleanup_backups(cfg: dict[str, Any], *, dry_run: bool) -> Result | None:
 
     users = sorted(path for path in home_root.glob(user_glob) if path.is_dir())
     for user_home in users:
+        policy = policy_by_user.get(user_home.name, {})
+        if not isinstance(policy, dict):
+            errors.append(f"{user_home}: ungueltige Cleanup-Policy")
+            continue
+        cleanup_enabled = bool(policy.get("enabled", cleanup.get("enabled", False)))
+        if not cleanup_enabled:
+            continue
+        snapshot_days = float(policy.get("retention_days", default_snapshot_days))
+        minimum_keep = int(policy.get("minimum_snapshots_to_keep", default_minimum_keep))
+        if not 1 <= snapshot_days <= 3650 or not 1 <= minimum_keep <= 100:
+            errors.append(f"{user_home}: ungueltige Retention ({snapshot_days} Tage, Minimum {minimum_keep})")
+            continue
+        snapshot_cutoff = now_epoch - snapshot_days * 86400
         snapshots = [
             child
             for child in user_home.iterdir()
@@ -767,7 +792,10 @@ def main() -> int:
     args = parse_args()
     CONFIG_DISPLAY = args.config
     try:
-        cfg = load_config(args.config, args.smtp_json_file, args.schedule_json_file, args.alerts_json_file)
+        cfg = load_config(
+            args.config, args.smtp_json_file, args.schedule_json_file,
+            args.alerts_json_file, args.cleanup_json_file,
+        )
         alerts = cfg["alerts"]
         smtp_enabled = bool(cfg["smtp"].get("enabled", True))
         hostname = socket.gethostname()

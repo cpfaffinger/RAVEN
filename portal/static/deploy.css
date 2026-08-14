@@ -226,3 +226,9 @@
 .interval-input { display: flex; gap: .4rem; align-items: center; }
 .interval-input input { min-width: 0; flex: 1 1 6rem; }
 .interval-input select { flex: 0 0 8rem; }
+.storage-facts { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 1rem; margin: 1rem 0; }
+.storage-facts span { color: var(--muted); }
+.storage-facts strong { display: block; color: var(--ink); font-size: 1.15rem; margin-top: .15rem; }
+.storage-facts small { display: block; margin-top: .15rem; }
+.storage-overview .space-bar > span { background: var(--accent2); }
+.storage-overview.storage-error .space-bar > span { background: var(--bad); }

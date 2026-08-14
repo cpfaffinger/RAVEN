@@ -103,7 +103,7 @@ Der Assistent installiert und validiert zuerst sämtliche System- und Python-Abh
 | SMTP | Host, Port, Benutzer, Passwort und Absender; die initiale Admin-E-Mail wird als erster Empfänger aktiviert, Transport ist fest Plain-SMTP | vorhandene Werte bzw. Vorbelegung |
 | Checker-Intervall | Abstand zentraler Backupprüfungen | `60` Minuten |
 | Freispeichergrenze | Alarm, wenn der freie Anteil darunter fällt | `15` Prozent |
-| Aufbewahrung | Alter persistenter Backup-Snapshots bis zur Rotation | `7` Tage |
+| Aufbewahrung | Initiale Policy-Retention für vollständige persistente Backup-Stände | `7` Tage |
 | Cleanup-Stunde | Lokale Stunde für die tägliche Rotation | `23` Uhr |
 | Bestandsimport | Import vorhandener `backup_*`-Systemkonten | aktiviert |
 | TLS-Modus | Cloudflare-DNS-Automatik, manueller DNS-Fallback, HTTP-01 oder vorhandene Zertifikatsdateien | `letsencrypt-dns-cloudflare` |
@@ -226,6 +226,10 @@ Diese Selbstaktualisierung kann erst greifen, wenn auf der Quelle einmal ein Age
 
 Die Frist des Checkers folgt dem Intervall der Policy: Er alarmiert nach dem Anderthalbfachen des Intervalls, für den Tagesplan also weiterhin nach 36 Stunden. Ein Eintrag unter `max_age_hours_by_user` in `backup-check.toml` bleibt eine bewusste manuelle Ausnahme und hat Vorrang.
 
+Auch die Rotation vollständiger datierter Backup-Ordner wird je Policy verwaltet. Eine Policy legt fest, ob das automatische Cleanup aktiv ist, nach wie vielen Tagen vollständige Stände ablaufen und wie viele der neuesten vollständigen Stände unabhängig vom Alter mindestens erhalten bleiben. `current/`-Spiegel werden nie durch diese Retention entfernt. Die globalen Sicherheitsfristen in `backup-check.toml` gelten weiterhin für unvollständige Läufe und historische Legacy-Dateien; bei direktem Standalone-Betrieb des Checkers dienen `snapshot_retention_days` und `minimum_snapshots_to_keep` als Fallback.
+
+Die Übersicht zeigt den freien, belegten und gesamten Speicher des Dateisystems, auf dem der Backup-Home-Root liegt, einschließlich der konfigurierten Alarmgrenze. Zusätzlich misst ein Portal-Worker stündlich den gesamten belegten Platz jedes einzelnen `backup_*`-Homes. Dieser Wert umfasst alle datierten Stände, `current/`, Metadaten und Logs und kann über den Tabellenkopf sortiert oder von einem Administrator sofort neu gemessen werden. Er ist deshalb bewusst vom Volumen des letzten Backup-Laufs getrennt.
+
 ## Spiegelserver
 
 Der Zielserver hält die Sicherungen so lange vor, wie es seine Rotation zulässt. Für eine längere Historie und eine zweite Kopie repliziert RAVEN den gesamten Bestand aus `/home` per rsync auf beliebig viele entfernte Spiegel. Verwaltet werden sie admin-only unter **Spiegelserver**.
@@ -250,7 +254,7 @@ Die Aufbewahrung greift ausschließlich auf Verzeichnisse, die exakt wie ein Bac
 
 ### Drei Betriebsmuster
 
-Wie weit die Historie eines Spiegels reicht, ergibt sich aus dem Zusammenspiel von rsync-Optionen und Intervall. Der Zielserver selbst rotiert nach `snapshot_retention_days`, standardmäßig sieben Tagen.
+Wie weit die Historie eines Spiegels reicht, ergibt sich aus dem Zusammenspiel von rsync-Optionen und Intervall. Der Zielserver selbst rotiert vollständige datierte Stände nach der Retention der jeweils zugewiesenen Policy.
 
 | Muster | Einstellung | Ergebnis |
 | --- | --- | --- |
