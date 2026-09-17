@@ -754,10 +754,12 @@ def database_inventory() -> tuple[list[str], dict[str, int]]:
     return sorted(databases), sizes
 
 
+# The database is always named positionally, never via --databases: that keeps
+# CREATE DATABASE and USE out of the dump, so it restores into any target schema.
 def dump_schema(cfg: dict[str, Any], db: str, db_dir: str, attempts: int) -> int:
     producer = [
         "/usr/bin/mariadb-dump", "--protocol=socket", "--skip-comments", "--hex-blob",
-        "--routines", "--events", "--triggers", "--no-data", "--databases", db,
+        "--routines", "--events", "--triggers", "--no-data", db,
     ]
     destination = f"{db_dir}/schema.sql.zst"
     stream_compressed(cfg, producer, destination, attempts=attempts)
@@ -767,7 +769,7 @@ def dump_schema(cfg: dict[str, Any], db: str, db_dir: str, attempts: int) -> int
 def dump_database_data(cfg: dict[str, Any], db: str, db_dir: str, attempts: int) -> int:
     producer = [
         "/usr/bin/mariadb-dump", "--protocol=socket", "--skip-comments", "--hex-blob",
-        "--single-transaction", "--quick", "--no-create-info", "--skip-triggers", "--databases", db,
+        "--single-transaction", "--quick", "--no-create-info", "--skip-triggers", db,
     ]
     destination = f"{db_dir}/data.sql.zst"
     stream_compressed(cfg, producer, destination, attempts=attempts)

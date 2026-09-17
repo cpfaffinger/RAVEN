@@ -82,7 +82,7 @@ python3 /root/backup --config /root/backup-job.toml --force</code></pre>
 
     <section id="data" class="panel doc-section">
       <p class="eyebrow">06</p><h2>Backup-Inhalte und Format</h2>
-      <table class="doc-table"><thead><tr><th>Klassifizierung</th><th>Inhalt</th><th>Methode</th></tr></thead><tbody><tr><td><code>filesystem_&lt;zielname&gt;</code></td><td>In der Policy definierter lokaler Ordner</td><td><code>sync</code> oder <code>tar.zst</code></td></tr><tr><td><code>mariadb_users</code></td><td>Benutzer und Rechte</td><td>Komprimierte CREATE USER- und GRANT-Anweisungen als <code>.sql.zst</code></td></tr><tr><td><code>mariadb_schemas</code></td><td>Schema jeder Anwendungsdatenbank</td><td>Komprimierter Dump ohne Daten als <code>.sql.zst</code></td></tr><tr><td><code>mariadb_data</code></td><td>Daten je Datenbank</td><td><code>mariadb-dump | zstd | ssh</code></td></tr></tbody></table>
+      <table class="doc-table"><thead><tr><th>Klassifizierung</th><th>Inhalt</th><th>Methode</th></tr></thead><tbody><tr><td><code>filesystem_&lt;zielname&gt;</code></td><td>In der Policy definierter lokaler Ordner</td><td><code>sync</code> oder <code>tar.zst</code></td></tr><tr><td><code>mariadb_users</code></td><td>Benutzer und Rechte</td><td>Komprimierte CREATE USER- und GRANT-Anweisungen als <code>.sql.zst</code></td></tr><tr><td><code>mariadb_schemas</code></td><td>Schema jeder Anwendungsdatenbank</td><td>Komprimierter Dump ohne Daten als <code>.sql.zst</code>, ohne <code>CREATE DATABASE</code> und <code>USE</code></td></tr><tr><td><code>mariadb_data</code></td><td>Daten je Datenbank</td><td><code>mariadb-dump | zstd | ssh</code></td></tr></tbody></table>
       <p>Systemdatenbanken wie <code>information_schema</code>, <code>performance_schema</code>, <code>mysql</code> und <code>sys</code> werden nicht als normale Anwendungsdatenbanken exportiert. Benutzer und Grants werden separat und nur bei aktivierter Benutzeroption gesichert. Große Datenbanken wechseln ab der konfigurierten Schwelle auf einen Tabellen-Fallback.</p>
       <h3>Zielstruktur</h3>
       <pre><code>/home/backup_&lt;slug&gt;/
@@ -155,10 +155,11 @@ ufw status | grep '{{ portal_port }}'</code></pre>
       <p class="eyebrow">13</p><h2>Wiederherstellung</h2>
       <div class="callout"><strong>Restore ist bewusst kein automatischer Portal-Button.</strong> Eine Wiederherstellung verändert Produktivdaten und muss immer zielgerichtet, geprüft und protokolliert erfolgen.</div>
       <h3>Dateisystem</h3><ol><li>Gewünschte Run-ID und gültige <code>.backup-ok</code> prüfen. Bei <code>sync</code> liegt ausschließlich der aktuelle Stand unter <code>current/</code>.</li><li>Manifest, Policy-Snapshot, Quelle, Modus, Zeitstempel und Volumen plausibilisieren.</li><li>Snapshots per rsync, Tar-Archive per <code>zstd -dc | tar -xf -</code> zunächst in ein separates Staging-Verzeichnis wiederherstellen.</li><li>Eigentümer, Gruppen, ACLs, Extended Attributes und Symlinks kontrollieren.</li><li>Erst danach ausgewählte Pfade in die Produktion übernehmen.</li></ol>
-      <h3>MariaDB</h3><ol><li>Benötigte Schema- und Datenarchive in ein Restore-Staging kopieren.</li><li>Mit <code>zstd -t</code> testen und mit <code>zstd -dc</code> entpacken.</li><li>Schema vor Daten importieren; bei Tabellen-Fallback alle Tabellenfiles berücksichtigen.</li><li>Benutzer und Grants separat und erst nach manueller Prüfung einspielen.</li><li>Anwendungskonsistenz und Rechte anschließend testen.</li></ol>
+      <h3>MariaDB</h3><ol><li>Benötigte Schema- und Datenarchive in ein Restore-Staging kopieren.</li><li>Mit <code>zstd -t</code> testen und mit <code>zstd -dc</code> entpacken.</li><li>Zieldatenbank anlegen oder auswählen und beim Import angeben – die Dumps enthalten weder <code>CREATE DATABASE</code> noch <code>USE</code> und lassen sich deshalb in jede beliebige Datenbank einspielen.</li><li>Schema vor Daten importieren; bei Tabellen-Fallback alle Tabellenfiles berücksichtigen.</li><li>Benutzer und Grants separat und erst nach manueller Prüfung einspielen; die Grants nennen die ursprünglichen Datenbanknamen und müssen bei abweichendem Ziel angepasst werden.</li><li>Anwendungskonsistenz und Rechte anschließend testen.</li></ol>
       <pre><code>zstd -t schema.sql.zst
-zstd -dc schema.sql.zst | mariadb
-zstd -dc data.sql.zst | mariadb</code></pre>
+mariadb -e 'CREATE DATABASE `zieldatenbank` DEFAULT CHARACTER SET utf8mb4'
+zstd -dc schema.sql.zst | mariadb zieldatenbank
+zstd -dc data.sql.zst | mariadb zieldatenbank</code></pre>
       <p>Vor einem Restore in eine bestehende Datenbank immer ein zusätzliches aktuelles Sicherungsabbild erstellen.</p>
     </section>
 
