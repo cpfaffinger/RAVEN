@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Backup-Policies · RAVEN{% endblock %}
+{% block title %}Policies · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Konfigurationsmodelle</p><h1>Backup-Policies</h1><p class="muted">Eine Policy bestimmt Zeitplan, Datenbankumfang und Ordnerregeln aller ihr zugewiesenen Server. Persistente Sicherungen werden ausschließlich als Zstandard-Archive geschrieben; nur Current Sync bleibt ein direkt nutzbarer Spiegel.</p></div></div>
+<div class="page-head"><div><p class="eyebrow">Sicherung</p><h1>Policies</h1><p class="muted">Eine Policy bestimmt Zeitplan, Datenbankumfang und Ordnerregeln aller ihr zugewiesenen Server. Persistente Sicherungen werden ausschließlich als Zstandard-Archive geschrieben; nur Current Sync bleibt ein direkt nutzbarer Spiegel.</p></div></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 {% if user.role == 'admin' %}
 <section class="panel">

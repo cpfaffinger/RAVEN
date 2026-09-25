@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ client.slug }} · Backup Explorer{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Backup Explorer</p><h1>{{ client.slug }}</h1><p class="muted">{{ total }} Einträge · Seite {{ page }} von {{ pages }}</p></div><a class="secondary button" href="/clients/{{ client.id }}">Serverdetails</a></div>
+<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/explorer">Backup Explorer</a><span class="sep">/</span><a href="/clients/{{ client.id }}">Server</a><span class="sep">/</span><span class="current">{{ client.slug }}</span></p><h1>{{ client.slug }}</h1><p class="muted">{{ total }} Einträge · Seite {{ page }} von {{ pages }}</p></div><a class="secondary button" href="/clients/{{ client.id }}">Serverdetails</a></div>
 <nav class="explorer-crumbs" aria-label="Pfad">{% for crumb in breadcrumbs %}<a href="/clients/{{ client.id }}/explorer?path={{ crumb.path|urlencode }}">{{ crumb.name }}</a>{% if not loop.last %}<span>/</span>{% endif %}{% endfor %}</nav>
 <section class="panel explorer-panel">
   {% macro column(key, label) %}<a class="sort-link" href="?path={{ relative|urlencode }}&amp;sort={{ key }}&amp;direction={{ 'desc' if sort == key and direction == 'asc' else 'asc' }}">{{ label }} <span aria-hidden="true">{{ '▲' if sort == key and direction == 'asc' else '▼' if sort == key else '↕' }}</span></a>{% endmacro %}

@@ -2,7 +2,7 @@
 {% block title %}Übersicht · RAVEN{% endblock %}
 {% block body_class %}layout-wide{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">RAVEN Backup-Zielserver</p><h1>RAVEN Systemübersicht</h1><p class="muted">Recovery, Archiving, Verification, Events &amp; Notification · Aktueller Zustand aller registrierten Quellserver.</p></div>{% if user.role == 'admin' %}<a class="primary button" href="/clients/new">Neuen Server onboarden</a>{% endif %}</div>
+<div class="page-head"><div><p class="eyebrow">Sicherung</p><h1>Server</h1><p class="muted">Aktueller Zustand aller registrierten Quellserver und des Backup-Ziels.</p></div>{% if user.role == 'admin' %}<div class="page-actions"><a class="primary button" href="/clients/new">Neuen Server onboarden</a></div>{% endif %}</div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 <section class="metrics">
   <article><span>Server</span><strong>{{ clients|length }}</strong></article>

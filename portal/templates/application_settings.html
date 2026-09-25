@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Konfiguration · RAVEN{% endblock %}
+{% block title %}Portal · Einstellungen · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Zentrale SQLite-Konfiguration</p><h1>Portal &amp; Onboarding</h1><p class="muted">Öffentliche Adresse und Agent-Defaults werden zentral verwaltet. Listener, TLS-Dateipfade und Master-Secret bleiben als bootkritische Werte in der root-only TOML.</p></div><span class="status success">DATENBANK AKTIV</span></div>
+<div class="page-head"><div><p class="eyebrow">Einstellungen</p><h1>Portal &amp; Onboarding</h1><p class="muted">Öffentliche Adresse und Agent-Defaults werden zentral verwaltet. Listener, TLS-Dateipfade und Master-Secret bleiben als bootkritische Werte in der root-only TOML.</p></div><span class="status success">DATENBANK AKTIV</span></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 {% if settings.domain_change_pending %}<div class="callout"><strong>Domainwechsel vorgemerkt:</strong> {{ configured.fqdn }}. Fordere auf der Zertifikatsseite das passende Zertifikat an; RAVEN aktiviert die neue Domain erst nach erfolgreicher Ausstellung.</div>{% endif %}
 <section class="panel">

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Deployment-Token · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Schritt 2 von 3</p><h1>{{ client.slug }} {{ 'erneut deployen' if already_deployed else 'onboarden' }}</h1><p class="muted">Der aktuelle Befehl kann bis zur Nutzung oder bis {{ expires_at or ('in ' ~ minutes ~ ' Minuten') }} erneut über diese Seite aufgerufen werden.</p></div></div>
+<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/">Server</a><span class="sep">/</span><a href="/clients/{{ client.id }}">{{ client.slug }}</a><span class="sep">/</span><span class="current">Deployment · Schritt 2 von 3</span></p><h1>{{ client.slug }} {{ 'erneut deployen' if already_deployed else 'onboarden' }}</h1><p class="muted">Der aktuelle Befehl kann bis zur Nutzung oder bis {{ expires_at or ('in ' ~ minutes ~ ' Minuten') }} erneut über diese Seite aufgerufen werden.</p></div></div>
 <ol class="onboarding-steps"><li class="done"><span>1</span><strong>Zielkonto</strong><small>{{ client.username }}</small></li><li class="active"><span>2</span><strong>{{ 'Re-Deployment' if already_deployed else 'Deployment' }}</strong><small>Curl ausführen</small></li><li><span>3</span><strong>Prüfung</strong><small>Ergebnis kontrollieren</small></li></ol>
 {% if command %}
 <section class="panel token-panel">

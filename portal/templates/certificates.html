@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}TLS-Zertifikate · RAVEN{% endblock %}
+{% block title %}Zertifikate · Einstellungen · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">TLS und ACME</p><h1>Zertifikate</h1><p class="muted">Let's-Encrypt-DNS-01 ohne Abhängigkeit von einem lokalen Webserver verwalten.</p></div><span class="status {{ 'running' if renewal_running or challenge_running else 'success' }}">{{ 'ACME LÄUFT' if renewal_running or challenge_running else 'BEREIT' }}</span></div>
+<div class="page-head"><div><p class="eyebrow">Einstellungen</p><h1>Zertifikate</h1><p class="muted">Let's-Encrypt-DNS-01 ohne Abhängigkeit von einem lokalen Webserver verwalten.</p></div><span class="status {{ 'running' if renewal_running or challenge_running else 'success' }}">{{ 'ACME LÄUFT' if renewal_running or challenge_running else 'BEREIT' }}</span></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong> Die Seite aktualisiert sich während einer laufenden Challenge automatisch.</div>{% endif %}
 <section class="detail-grid certificate-grid">
   <article class="panel"><p class="eyebrow">Aktives Zertifikat</p><h2>{{ acme.domain or 'Nicht konfiguriert' }}</h2>

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ client.slug }} · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">{{ client.username }}</p><h1>{{ client.slug }}</h1><p class="muted">{{ client.source_hostname or 'Noch nicht onboarded' }}</p></div>{% if user.role == 'admin' %}<a class="secondary button" href="/clients/{{ client.id }}/explorer">Backup durchsuchen</a>{% endif %}</div>
+<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/">Server</a><span class="sep">/</span><span class="current">{{ client.slug }}</span></p><h1>{{ client.slug }}</h1><p class="muted">Zielkonto <code>{{ client.username }}</code> · {{ client.source_hostname or 'Noch nicht onboarded' }}</p></div>{% if user.role == 'admin' %}<div class="page-actions"><a class="secondary button" href="/clients/{{ client.id }}/explorer">Backup durchsuchen</a></div>{% endif %}</div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 {% if user.role == 'admin' %}
 <ol class="onboarding-steps compact"><li class="done"><span>1</span><strong>Zielkonto</strong><small>{{ client.username }}</small></li><li class="{{ 'active' if not active_deployment else 'done' }}"><span>2</span><strong>{{ 'Re-Deployment' if already_deployed else 'Deployment' }}</strong><small>{{ 'Befehl verfügbar' if active_deployment else ('Erneut ausliefern' if already_deployed else 'Befehl erzeugen') }}</small></li><li class="{{ 'done' if client.last_event in ['heartbeat','success'] else '' }}"><span>3</span><strong>Prüfung</strong><small>{{ (client.last_event or 'Ausstehend')|upper }}</small></li></ol>

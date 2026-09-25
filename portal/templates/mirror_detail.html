@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ target.name }} · Spiegelserver{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Spiegelserver</p><h1>{{ target.name }}</h1><p class="muted">{{ target.username }}@{{ target.host }}:{{ target.ssh_port }} → <code>{{ target.remote_path }}</code></p></div><a class="secondary button" href="/mirrors">Alle Spiegel</a></div>
+<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/mirrors">Spiegelserver</a><span class="sep">/</span><span class="current">{{ target.name }}</span></p><h1>{{ target.name }}</h1><p class="muted">{{ target.username }}@{{ target.host }}:{{ target.ssh_port }} → <code>{{ target.remote_path }}</code></p></div></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 <section class="panel control-panel">
   <div><p class="eyebrow">Replikation</p><h2>Bestand jetzt spiegeln</h2><p class="muted">Repliziert alle Backup-Zielkonten unterhalb von <code>{{ source_path }}</code> auf dieses Ziel. Es läuft immer nur eine Replikation gleichzeitig.</p></div>

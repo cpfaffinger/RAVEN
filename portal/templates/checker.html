@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Backup Checker · RAVEN{% endblock %}
+{% block title %}Checker · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Portal-gesteuerte Überwachung</p><h1>Backup Checker</h1><p class="muted">Prüfung, Alarmierung, Speicherüberwachung und Aufbewahrung ohne Cron.</p></div><span class="status {{ 'success' if settings.enabled else 'interrupted' }}">{{ 'AUTOMATIK AKTIV' if settings.enabled else 'AUTOMATIK PAUSIERT' }}</span></div>
+<div class="page-head"><div><p class="eyebrow">Kontrolle</p><h1>Checker</h1><p class="muted">Prüfung, Alarmierung, Speicherüberwachung und Aufbewahrung ohne Cron.</p></div><span class="status {{ 'success' if settings.enabled else 'interrupted' }}">{{ 'AUTOMATIK AKTIV' if settings.enabled else 'AUTOMATIK PAUSIERT' }}</span></div>
 <section class="metrics checker-metrics"><article class="good"><span>OK</span><strong>{{ statuses.OK }}</strong></article><article class="warn"><span>Stale</span><strong>{{ statuses.STALE }}</strong></article><article class="bad"><span>Fehler</span><strong>{{ statuses.ERROR }}</strong></article><article><span>Unbekannt</span><strong>{{ statuses.UNKNOWN }}</strong></article></section>
 <section class="detail-grid checker-controls">
   <article class="panel"><p class="eyebrow">Zeitplan</p><h2>Portal-Worker</h2><dl><dt>Status</dt><dd>{{ 'Aktiv' if settings.enabled else 'Pausiert' }}</dd><dt>Intervall</dt><dd>{{ settings.interval_minutes }} Minuten</dd><dt>Nächster Lauf</dt><dd>{{ settings.next_run_at if settings.enabled else '–' }}</dd><dt>Statusdatei</dt><dd>{{ state_updated or 'Noch nicht vorhanden' }}</dd></dl>

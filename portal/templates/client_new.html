@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Server onboarden · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Schritt 1 von 3</p><h1>Neuen Quellserver anlegen</h1><p class="muted">Zielkonto, Policy, Benachrichtigungen und Logging für den neuen Backup-Agenten festlegen. Wunschzeit und Intervall kommen aus der gewählten Policy.</p></div></div>
+<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/">Server</a><span class="sep">/</span><span class="current">Neuer Server · Schritt 1 von 3</span></p><h1>Neuen Quellserver anlegen</h1><p class="muted">Zielkonto, Policy, Benachrichtigungen und Logging für den neuen Backup-Agenten festlegen. Wunschzeit und Intervall kommen aus der gewählten Policy.</p></div></div>
 <ol class="onboarding-steps"><li class="active"><span>1</span><strong>Server</strong><small>Konfiguration</small></li><li><span>2</span><strong>Deployment</strong><small>Curl-Befehl</small></li><li><span>3</span><strong>Prüfung</strong><small>Heartbeat & Backup</small></li></ol>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <section class="panel">

@@ -44,9 +44,9 @@ RAVEN ist für einen dedizierten Backup-Zielserver vorgesehen. Das Portal läuft
 
 Alle vom Betreiber verwalteten Secrets lassen sich im Webinterface setzen oder rotieren:
 
-- Portal-Benutzerpasswörter unter **Benutzer**
-- SMTP-Benutzer und -Passwort unter **SMTP**
-- Cloudflare API-Token unter **Zertifikate**; der Wert wird nach dem Speichern nie wieder angezeigt
+- Portal-Benutzerpasswörter unter **Einstellungen → Benutzer**
+- SMTP-Benutzer und -Passwort unter **Einstellungen → SMTP**
+- Cloudflare API-Token unter **Einstellungen → Zertifikate**; der Wert wird nach dem Speichern nie wieder angezeigt
 - Deployment- und Agent-Tokens werden vom Portal erzeugt und nicht als Klartext in SQLite gespeichert
 
 Das interne Session-/Verschlüsselungssecret wird bei der Installation zufällig erzeugt und root-only gespeichert. SMTP-Passwort und Cloudflare-Token liegen ausschließlich verschlüsselt in SQLite; die TOML-Dateien enthalten nach abgeschlossener Installation keine Betreiber-Zugangsdaten. Die `.gitignore` schließt typische Secret-, Schlüssel-, Datenbank- und Laufzeitdateien aus.
@@ -110,9 +110,9 @@ Der Assistent installiert und validiert zuerst sämtliche System- und Python-Abh
 
 Das Admin-Passwort wird verdeckt abgefragt. Das SMTP-Passwort kann bei einer erneuten Installation durch eine leere Eingabe unverändert übernommen werden.
 
-SMTP wird bei der Initialisierung in die eingebettete SQLite-Datenbank übernommen und danach im Webinterface zentral verwaltet; das Passwort ist mit dem Portal-Master-Secret verschlüsselt. Empfänger werden ausschließlich unter **Benutzer** über E-Mail-Adresse und **Mails erhalten** gesteuert. Wann überhaupt eine Mail entsteht, steht bei den auslösenden Stellen: Backup-Ereignisse in der Policy, Prüfergebnisse unter **Checker**. Nur aktive, freigeschaltete Benutzer erhalten Berichte. Checker laden die Liste bei jedem Lauf; Agenten übernehmen Änderungen beim nächsten Poll als atomare Konfigurationsaktualisierung. Beide Versandwege verwenden bewusst ausschließlich Plain-SMTP ohne STARTTLS oder SMTPS.
+SMTP wird bei der Initialisierung in die eingebettete SQLite-Datenbank übernommen und danach im Webinterface zentral verwaltet; das Passwort ist mit dem Portal-Master-Secret verschlüsselt. Empfänger werden ausschließlich unter **Einstellungen → Benutzer** über E-Mail-Adresse und **Mails erhalten** gesteuert. Wann überhaupt eine Mail entsteht, steht bei den auslösenden Stellen: Backup-Ereignisse in der Policy, Prüfergebnisse unter **Checker**. Nur aktive, freigeschaltete Benutzer erhalten Berichte. Checker laden die Liste bei jedem Lauf; Agenten übernehmen Änderungen beim nächsten Poll als atomare Konfigurationsaktualisierung. Beide Versandwege verwenden bewusst ausschließlich Plain-SMTP ohne STARTTLS oder SMTPS.
 
-Domain und Onboarding-Werte werden bei der Erstinstallation aus den Assistentenangaben in die eingebettete SQLite-Datenbank übernommen und danach admin-only unter **Konfiguration** verwaltet. Der resultierende FQDN gilt zentral für Portal- und Curl-Links, Agent-Endpunkte, SSH-Onboarding, Trusted Hosts, Let’s Encrypt und die Cloudflare-Zone. Ein Domainwechsel wird zunächst vorgemerkt und erst nach erfolgreicher Ausstellung des passenden Zertifikats atomar aktiviert. Nur Listeneradresse/-port, TLS-Bootstrap-Pfade, Dateipfade und Master-Secret bleiben als bootkritische Werte in der root-only TOML.
+Domain und Onboarding-Werte werden bei der Erstinstallation aus den Assistentenangaben in die eingebettete SQLite-Datenbank übernommen und danach admin-only unter **Einstellungen → Portal** verwaltet. Der resultierende FQDN gilt zentral für Portal- und Curl-Links, Agent-Endpunkte, SSH-Onboarding, Trusted Hosts, Let’s Encrypt und die Cloudflare-Zone. Ein Domainwechsel wird zunächst vorgemerkt und erst nach erfolgreicher Ausstellung des passenden Zertifikats atomar aktiviert. Nur Listeneradresse/-port, TLS-Bootstrap-Pfade, Dateipfade und Master-Secret bleiben als bootkritische Werte in der root-only TOML.
 
 ### 3. Automatisch ausgeführte Installationsschritte
 
@@ -181,11 +181,11 @@ Für `TLS_MODE=existing` müssen zusätzlich `TLS_CERT_PATH` und `TLS_KEY_PATH` 
 
 ### Let's Encrypt über DNS-01
 
-`letsencrypt-dns-cloudflare` ist der empfohlene Modus und benötigt keinen lokalen Nginx, Apache oder Listener auf Port 80. Der Installer prüft zuerst das Cloudflare-Token und ermittelt die Zone anhand der optional angegebenen Zone-ID oder automatisch anhand des Zertifikatsnamens. Derselbe gefahrlose Token-/Zone-Lesetest kann später im Menü **Zertifikate** erneut ausgeführt werden; Ergebnis und Laufzeit erscheinen auch unter **Prozesse**. Certbot erzeugt anschließend einen DNS-01-Token; der Hook legt exakt diesen TXT-Record über die Cloudflare API an, wartet auf die Sichtbarkeit über alle konfigurierten Resolver und löscht exakt die zurückgelieferte Record-ID nach der Validierung wieder.
+`letsencrypt-dns-cloudflare` ist der empfohlene Modus und benötigt keinen lokalen Nginx, Apache oder Listener auf Port 80. Der Installer prüft zuerst das Cloudflare-Token und ermittelt die Zone anhand der optional angegebenen Zone-ID oder automatisch anhand des Zertifikatsnamens. Derselbe gefahrlose Token-/Zone-Lesetest kann später im Menü **Einstellungen → Zertifikate** erneut ausgeführt werden; Ergebnis und Laufzeit erscheinen auch unter **Prozesse**. Certbot erzeugt anschließend einen DNS-01-Token; der Hook legt exakt diesen TXT-Record über die Cloudflare API an, wartet auf die Sichtbarkeit über alle konfigurierten Resolver und löscht exakt die zurückgelieferte Record-ID nach der Validierung wieder.
 
 Die admin-only Seite **Prozesse** fasst Portal-Dienst, Scheduler, Checker-Worker, Zertifikatstimer und -dienst sowie die Historien von Backup-Aufträgen, Checker-, Policy-Cleanup-, ACME- und Cloudflare-Läufen zusammen. Dort kann jede Policy zunächst als löschfreie Vorschau oder nach ausdrücklicher Bestätigung als tatsächlicher Cleanup gestartet werden. Der Lauf ist strikt auf die aktiven Zielkonten dieser Policy begrenzt, verwendet deren Retention und Mindeststände, sendet keine Mail und startet nicht parallel zu einem Checker oder zu einem aktiven/eingeplanten Backup derselben Policy. Sie zeigt bewusst nur von RAVEN verwaltete Abläufe und keine vollständige Betriebssystem-Prozessliste.
 
-Das Token wird bei der Erstinstallation verdeckt abgefragt, nach der Zertifikatsausstellung verschlüsselt in SQLite übernommen und aus der temporären Credentials-Datei entfernt. Danach werden Token, optionale Zone-ID und TTL ausschließlich unter **Zertifikate** verwaltet. Das Portal zeigt weder Token noch API-Header an. Empfohlen ist ein eigenes API-Token, das auf genau die Zertifikatszone beschränkt ist. Bei gesetzter Zone-ID genügt `Zone DNS Edit`; für die automatische Zonensuche wird zusätzlich `Zone Read` benötigt. Globale API-Keys werden nicht unterstützt.
+Das Token wird bei der Erstinstallation verdeckt abgefragt, nach der Zertifikatsausstellung verschlüsselt in SQLite übernommen und aus der temporären Credentials-Datei entfernt. Danach werden Token, optionale Zone-ID und TTL ausschließlich unter **Einstellungen → Zertifikate** verwaltet. Das Portal zeigt weder Token noch API-Header an. Empfohlen ist ein eigenes API-Token, das auf genau die Zertifikatszone beschränkt ist. Bei gesetzter Zone-ID genügt `Zone DNS Edit`; für die automatische Zonensuche wird zusätzlich `Zone Read` benötigt. Globale API-Keys werden nicht unterstützt.
 
 Der Datensatz hat dieses Schema:
 
@@ -195,7 +195,7 @@ Name: _acme-challenge.backup.example.com
 Wert: <vom Installer oder Portal angezeigter ACME-Wert>
 ```
 
-Jede reguläre DNS-01-Erneuerung erzeugt einen neuen Wert. Der tägliche `backup-portal-cert-renew.timer` prüft, ob Certbot eine Erneuerung verlangt. Sobald eine neue Challenge läuft, zeigt das admin-only Menü **Zertifikate** TXT-Name, TXT-Wert, Cloudflare-Status, Propagationsstatus, Resolver und Cleanup-Ergebnis. Anlage, Prüfung und Entfernung des Records laufen unbeaufsichtigt. Nach erfolgreicher Ausstellung wird das Portal neu gestartet, damit Uvicorn das rotierte Zertifikat lädt.
+Jede reguläre DNS-01-Erneuerung erzeugt einen neuen Wert. Der tägliche `backup-portal-cert-renew.timer` prüft, ob Certbot eine Erneuerung verlangt. Sobald eine neue Challenge läuft, zeigt das admin-only Menü **Einstellungen → Zertifikate** TXT-Name, TXT-Wert, Cloudflare-Status, Propagationsstatus, Resolver und Cleanup-Ergebnis. Anlage, Prüfung und Entfernung des Records laufen unbeaufsichtigt. Nach erfolgreicher Ausstellung wird das Portal neu gestartet, damit Uvicorn das rotierte Zertifikat lädt.
 
 Existiert beim Setup bereits ein Zertifikat, kann der Assistent es unverändert übernehmen oder sofort kontrolliert per DNS-01 neu ausstellen. Im nicht-interaktiven Modus erzwingt `ACME_FORCE_REISSUE=yes` diese Migration und wartet ebenfalls auf den neuen TXT-Eintrag.
 
@@ -208,7 +208,7 @@ journalctl -u backup-portal-cert-renew.service
 
 ## Backupzeit und Intervall
 
-Wunschzeit und Intervall gehören zur Backup-Policy und gelten damit für alle Server, die diese Policy verwenden. Unter **Policies** werden Stunde, Minute und Intervall gesetzt, unter **Konfiguration** die Vorbelegung für neu angelegte Policies.
+Wunschzeit und Intervall gehören zur Backup-Policy und gelten damit für alle Server, die diese Policy verwenden. Unter **Policies** werden Stunde, Minute und Intervall gesetzt, unter **Einstellungen → Portal** die Vorbelegung für neu angelegte Policies.
 
 Die Wunschzeit ist der Anker des Musters. Bei 24 Stunden ist genau ein Backup pro Tag zu dieser Uhrzeit fällig, bei sechs Stunden zusätzlich alle sechs Stunden ab diesem Anker. Erlaubt sind ausschließlich Teiler von 24 Stunden und ganze Vielfache von 24 Stunden bis zu einer Woche; damit bleibt der Anker über Tagesgrenzen hinweg stabil.
 

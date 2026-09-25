@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ policy.name }} · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">Backup-Policy #{{ policy.id }}</p><h1>{{ policy.name }}</h1><p class="muted">{{ clients|length }} zugewiesene Server · Änderungen gelten für neu gequeuete Aufträge.</p></div><a class="secondary button" href="/policies">Alle Policies</a></div>
+<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/policies">Policies</a><span class="sep">/</span><span class="current">Policy #{{ policy.id }}</span></p><h1>{{ policy.name }}</h1><p class="muted">{{ clients|length }} zugewiesene Server · Änderungen gelten für neu gequeuete Aufträge.</p></div></div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 {% if user.role == 'admin' %}
 <section class="panel">

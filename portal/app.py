@@ -956,9 +956,41 @@ def verify_csrf(user: sqlite3.Row, supplied: str) -> None:
         raise HTTPException(status_code=403, detail="Ungueltiges CSRF-Token")
 
 
+NAV_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("explorer", ("/explorer",)),
+    ("policies", ("/policies",)),
+    ("checker", ("/checker",)),
+    ("mirrors", ("/mirrors",)),
+    ("processes", ("/processes",)),
+    ("settings", ("/settings/application",)),
+    ("smtp", ("/settings/smtp",)),
+    ("certificates", ("/certificates",)),
+    ("users", ("/users",)),
+    ("manual", ("/manual",)),
+    ("servers", ("/", "/clients")),
+)
+
+
+def nav_section(path: str) -> str:
+    """Map a request path to the sidebar entry that should light up."""
+    if path.startswith("/clients/") and "/explorer" in path:
+        return "explorer"
+    for key, prefixes in NAV_SECTIONS:
+        for prefix in prefixes:
+            if path == prefix or (prefix != "/" and path.startswith(prefix)):
+                return key
+    return ""
+
+
 def render(request: Request, name: str, context: dict[str, Any], status_code: int = 200) -> HTMLResponse:
     user = session_user(request)
-    merged = {"request": request, "user": user, "csrf": user["csrf_token"] if user else "", **context}
+    merged = {
+        "request": request,
+        "user": user,
+        "csrf": user["csrf_token"] if user else "",
+        "nav_active": nav_section(request.url.path),
+        **context,
+    }
     return templates.TemplateResponse(name, merged, status_code=status_code)
 
 
