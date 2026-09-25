@@ -20,7 +20,7 @@ Policies dürfen vollständig leer sein. Ohne Dateisystempfade und mit beiden de
 
 Die Portal-Einstellungen werden als versionierte, fertig konfektionierte TOML-Datei im Curl-Onboarding an die Quelle geliefert. Dazu gehören Loglevel, lokale Ausgabe, dauerhafter Portal-Upload, Traceback, Loggrößenlimit sowie getrennte Erfolgs- und Fehlermails. Nach jedem tatsächlich gestarteten Backup überträgt der Agent sein begrenztes Laufprotokoll und eine kompakte Ergebnisstruktur an das Portal. Diese Daten liegen in SQLite und bleiben erhalten, wenn das eigentliche Backup später rotiert oder gelöscht wird.
 
-Ein noch unbenutzter Curl-Befehl kann aus den Clientdetails bis zum Ablauf erneut angezeigt oder aktiv widerrufen werden. Dafür liegt das Deployment-Token zusätzlich zum Prüfdigest ausschließlich symmetrisch verschlüsselt in SQLite; nach Verwendung, Widerruf oder Ablauf ist kein Wiederabruf mehr möglich.
+Ein bereits onboardeter Server lässt sich über dieselbe Stelle erneut deployen; dabei kann optional ein neuer SSH-Schlüssel erzeugt werden, der den bisherigen im Zielkonto ersetzt. Ein noch unbenutzter Curl-Befehl kann aus den Clientdetails bis zum Ablauf erneut angezeigt oder aktiv widerrufen werden. Dafür liegt das Deployment-Token zusätzlich zum Prüfdigest ausschließlich symmetrisch verschlüsselt in SQLite; nach Verwendung, Widerruf oder Ablauf ist kein Wiederabruf mehr möglich.
 
 ## Betrieb
 

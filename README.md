@@ -153,7 +153,7 @@ Danach im Browser `https://<Portal-Hostname>:<HTTPS-Port>` öffnen und mit dem w
 4. Den angezeigten Curl-Befehl einmalig als `root` auf dem Quellserver ausführen.
 5. Agent-Readiness, ersten Portal-Poll und später das Ergebnis des geplanten Backups im Dashboard kontrollieren.
 
-Ein erneutes Deployment ist idempotent: vorhandene RAVEN-Schlüssel werden wiederverwendet. Historische `pulseone_backup_*`-Identitäten werden ohne Schlüsselrotation in den aktuellen `raven_backup_*`-Pfad übernommen, und der öffentliche Schlüssel wird stets neu aus dem privaten Schlüssel abgeleitet.
+Ein bereits onboardeter Server kann aus den Clientdetails jederzeit **erneut deployt** werden. Das Re-Deployment installiert Agent, Konfiguration, SSH- und Cron-Block frisch und vergibt ein neues Agent-Token. Standardmäßig ist dabei **Neuen SSH-Schlüssel erzeugen** aktiv: Der Bootstrap legt den bisherigen `raven_backup_*`-Schlüssel beiseite, erzeugt einen frischen Ed25519-Schlüssel, und das Portal ersetzt den Eintrag in `authorized_keys`, sodass der alte Schlüssel sofort seinen Zugang verliert; nach erfolgreicher Registrierung wird er auf der Quelle gelöscht. Scheitert die Registrierung, bleibt der alte Schlüssel als `raven_backup_<slug>.replaced-<Zeitstempel>` für ein Zurückrollen erhalten. Ohne diese Option ist das Re-Deployment idempotent: vorhandene RAVEN-Schlüssel werden wiederverwendet. Historische `pulseone_backup_*`-Identitäten werden ohne Schlüsselrotation in den aktuellen `raven_backup_*`-Pfad übernommen, und der öffentliche Schlüssel wird stets neu aus dem privaten Schlüssel abgeleitet.
 
 ### Nicht-interaktive Installation
 

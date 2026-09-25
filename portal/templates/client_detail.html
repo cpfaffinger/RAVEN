@@ -4,14 +4,22 @@
 <div class="page-head"><div><p class="eyebrow">{{ client.username }}</p><h1>{{ client.slug }}</h1><p class="muted">{{ client.source_hostname or 'Noch nicht onboarded' }}</p></div>{% if user.role == 'admin' %}<a class="secondary button" href="/clients/{{ client.id }}/explorer">Backup durchsuchen</a>{% endif %}</div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 {% if user.role == 'admin' %}
-<ol class="onboarding-steps compact"><li class="done"><span>1</span><strong>Zielkonto</strong><small>{{ client.username }}</small></li><li class="{{ 'active' if not active_deployment else 'done' }}"><span>2</span><strong>Deployment</strong><small>{{ 'Befehl verfügbar' if active_deployment else 'Befehl erzeugen' }}</small></li><li class="{{ 'done' if client.last_event in ['heartbeat','success'] else '' }}"><span>3</span><strong>Prüfung</strong><small>{{ (client.last_event or 'Ausstehend')|upper }}</small></li></ol>
+<ol class="onboarding-steps compact"><li class="done"><span>1</span><strong>Zielkonto</strong><small>{{ client.username }}</small></li><li class="{{ 'active' if not active_deployment else 'done' }}"><span>2</span><strong>{{ 'Re-Deployment' if already_deployed else 'Deployment' }}</strong><small>{{ 'Befehl verfügbar' if active_deployment else ('Erneut ausliefern' if already_deployed else 'Befehl erzeugen') }}</small></li><li class="{{ 'done' if client.last_event in ['heartbeat','success'] else '' }}"><span>3</span><strong>Prüfung</strong><small>{{ (client.last_event or 'Ausstehend')|upper }}</small></li></ol>
 <section class="panel">
   <form method="post" action="/clients/{{ client.id }}/token" class="deploy-panel">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    {% if already_deployed %}
+    <div><p class="eyebrow">Agent erneut ausliefern</p><h2>Server erneut deployen</h2><p class="muted">Dieser Server ist bereits onboarded{% if client.source_hostname %} ({{ client.source_hostname }}){% endif %}. Ein erneutes Deployment installiert Agent, Konfiguration, SSH- und Cron-Block frisch und vergibt ein neues Agent-Token. Optional wird dabei ein neuer SSH-Schlüssel erzeugt; der bisherige verliert dann sofort seinen Zugang.</p></div>
+    <div class="deploy-options">
+      <label class="inline-check"><input type="checkbox" name="rotate_ssh_key" checked> Neuen SSH-Schlüssel erzeugen und bisherigen ersetzen</label>
+      <label class="inline-check"><input type="checkbox" name="run_initial_backup"> Nach Installation sofort ein vollständiges Backup starten</label>
+    </div>
+    {% else %}
     <div><p class="eyebrow">Agent ausliefern</p><h2>Ein-Befehl-Deployment</h2><p class="muted">Das Portal liefert Backup-Script und Konfiguration. Auf der Quelle wird danach nur der erzeugte curl-Befehl als root ausgeführt.</p></div>
     <label class="inline-check"><input type="checkbox" name="run_initial_backup" checked> Nach Installation sofort ein vollständiges Backup starten</label>
+    {% endif %}
     <div class="deploy-actions">
-      <button class="primary">{{ 'Neuen Curl-Befehl erzeugen' if active_deployment else 'Curl-Befehl erzeugen' }}</button>
+      <button class="primary">{% if active_deployment %}Neuen Curl-Befehl erzeugen{% elif already_deployed %}Curl-Befehl für Re-Deployment erzeugen{% else %}Curl-Befehl erzeugen{% endif %}</button>
       {% if active_deployment %}<a class="secondary button" href="/clients/{{ client.id }}/deployment">Aktiven Befehl wieder anzeigen</a>{% endif %}
     </div>
   </form>

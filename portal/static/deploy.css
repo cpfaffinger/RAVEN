@@ -19,6 +19,9 @@
 
 .inline-check input { width: auto; }
 
+.deploy-options { display: grid; gap: .55rem; }
+.alert.info { background: #e7eef8; color: #315d91; }
+
 @media (max-width: 900px) {
   .deploy-panel { grid-template-columns: 1fr; }
 }

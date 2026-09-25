@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 
@@ -107,12 +108,45 @@ def ensure_backup_dependencies():
     print("Backup-Abhängigkeiten geprüft: Debian/Ubuntu, bash, rsync, OpenSSH, tar und zstd sind bereit.", flush=True)
 
 
-def ensure_ssh_identity(ssh_dir, client_slug):
+def retire_ssh_identity(key_path):
+    """Move an existing key pair aside so a fresh one can be generated.
+
+    The previous private key is kept root-only next to the new one until the
+    portal has accepted the new public key. If registration fails, the source
+    still holds the key the portal knows and an operator can restore it.
+    """
+    if not key_path.exists():
+        return None
+    key_stat = key_path.lstat()
+    if key_path.is_symlink() or not stat.S_ISREG(key_stat.st_mode) or key_stat.st_uid != 0:
+        fail(f"unsicherer privater SSH-Schlüssel: {key_path}")
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    retired_path = key_path.with_name(f"{key_path.name}.replaced-{stamp}")
+    os.replace(key_path, retired_path)
+    os.chmod(retired_path, 0o600)
+    public_path = key_path.with_name(key_path.name + ".pub")
+    if public_path.exists() or public_path.is_symlink():
+        public_path.unlink()
+    print(
+        f"Bestehende SSH-Identität {key_path.name} beiseitegelegt ({retired_path.name}); "
+        "ein neuer Ed25519-Schlüssel wird erzeugt.",
+        flush=True,
+    )
+    return retired_path
+
+
+def ensure_ssh_identity(ssh_dir, client_slug, rotate=False):
     key_path = ssh_dir / f"raven_backup_{client_slug}"
     legacy_key_path = ssh_dir / f"pulseone_backup_{client_slug}"
 
     if key_path.is_symlink():
         fail(f"unsicherer privater SSH-Schlüssel: {key_path}")
+    retired_path = None
+    if rotate:
+        retired_path = retire_ssh_identity(key_path)
+        if retired_path is None and legacy_key_path.exists():
+            # Rotation replaces the historical identity as well instead of adopting it.
+            retired_path = retire_ssh_identity(legacy_key_path)
     if not key_path.exists():
         if legacy_key_path.is_symlink():
             fail(f"unsicherer historischer SSH-Schlüssel: {legacy_key_path}")
@@ -157,6 +191,8 @@ def ensure_ssh_identity(ssh_dir, client_slug):
     if derived.returncode != 0 or len(public_parts) < 2 or public_parts[0] != "ssh-ed25519":
         fail(f"privater SSH-Schlüssel ist ungültig oder kein Ed25519-Schlüssel: {key_path}")
     public_key = " ".join(public_parts[:2])
+    if rotate:
+        print(f"Neuer öffentlicher Schlüssel: {public_key}", flush=True)
 
     public_path = key_path.with_name(key_path.name + ".pub")
     file_descriptor, temporary_name = tempfile.mkstemp(
@@ -172,7 +208,7 @@ def ensure_ssh_identity(ssh_dir, client_slug):
             pathlib.Path(temporary_name).unlink()
         except FileNotFoundError:
             pass
-    return key_path, public_key
+    return key_path, public_key, retired_path
 
 
 if os.geteuid() != 0:
@@ -184,7 +220,8 @@ if "--dependencies-only" in sys.argv:
 
 ssh_dir = pathlib.Path("/root/.ssh")
 ssh_dir.mkdir(mode=0o700, exist_ok=True)
-key_path, public_key = ensure_ssh_identity(ssh_dir, CLIENT_SLUG)
+rotate_ssh_key = bool(globals().get("ROTATE_SSH_KEY", False))
+key_path, public_key, retired_key_path = ensure_ssh_identity(ssh_dir, CLIENT_SLUG, rotate=rotate_ssh_key)
 
 payload = json.dumps(
     {
@@ -203,7 +240,18 @@ try:
     with urllib.request.urlopen(request, timeout=30) as response:
         result = json.loads(response.read().decode("utf-8"))
 except Exception as exc:
+    if retired_key_path is not None:
+        print(
+            f"Der bisherige Schlüssel liegt weiterhin unter {retired_key_path}; "
+            f"zum Zurückrollen nach {key_path} zurückbenennen.",
+            flush=True,
+        )
     fail(f"Registrierung beim Portal nicht moeglich: {exc}")
+
+if retired_key_path is not None:
+    # The portal replaced the authorized key, so the old private key is now useless.
+    retired_key_path.unlink()
+    print("Bisheriger privater SSH-Schlüssel entfernt; das Portal akzeptiert nur noch den neuen Schlüssel.", flush=True)
 
 backup_path = pathlib.Path("/root/backup")
 backup_path.write_bytes(base64.b64decode(result["backup_script_b64"]))

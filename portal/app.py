@@ -356,6 +356,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS deployment_tokens (
               token_hash TEXT PRIMARY KEY, client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
               token_ciphertext TEXT, expires_at INTEGER NOT NULL, used_at TEXT,
+              rotate_ssh_key INTEGER NOT NULL DEFAULT 0,
               created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS status_events (
@@ -546,6 +547,8 @@ def init_db() -> None:
         token_columns = {row[1] for row in connection.execute("PRAGMA table_info(deployment_tokens)")}
         if "token_ciphertext" not in token_columns:
             connection.execute("ALTER TABLE deployment_tokens ADD COLUMN token_ciphertext TEXT")
+        if "rotate_ssh_key" not in token_columns:
+            connection.execute("ALTER TABLE deployment_tokens ADD COLUMN rotate_ssh_key INTEGER NOT NULL DEFAULT 0")
         client_columns = {row[1] for row in connection.execute("PRAGMA table_info(clients)")}
         if "last_poll_at" not in client_columns:
             connection.execute("ALTER TABLE clients ADD COLUMN last_poll_at TEXT")
@@ -4506,7 +4509,7 @@ def client_detail(request: Request, client_id: int):
         client = connection.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
         events = connection.execute("SELECT * FROM status_events WHERE client_id=? ORDER BY id DESC LIMIT 20", (client_id,)).fetchall()
         active_deployment = connection.execute(
-            "SELECT expires_at FROM deployment_tokens WHERE client_id=? AND used_at IS NULL "
+            "SELECT expires_at,rotate_ssh_key FROM deployment_tokens WHERE client_id=? AND used_at IS NULL "
             "AND expires_at>=? AND token_ciphertext IS NOT NULL ORDER BY created_at DESC LIMIT 1",
             (client_id, now_ts()),
         ).fetchone()
@@ -4557,6 +4560,7 @@ def client_detail(request: Request, client_id: int):
             "agent_payload": agent_payload,
             "agent_volume": format_size(agent_payload.get("logical_run_bytes")),
             "active_deployment": dict(active_deployment) if active_deployment else None,
+            "already_deployed": client_already_deployed(client),
             "commands": commands,
             "run_logs": run_logs,
             "active_command": dict(active_command) if active_command else None,
@@ -4751,6 +4755,15 @@ def trigger_backup(
     return RedirectResponse(f"/clients/{client_id}?message={quote(message)}", status_code=303)
 
 
+def client_already_deployed(client: sqlite3.Row) -> bool:
+    """True once a source server holds an agent or key for this client.
+
+    Imported accounts were provisioned outside the portal and already carry a
+    key in authorized_keys, so they count as deployed as well.
+    """
+    return bool(client["agent_token_hash"]) or bool(client["imported"])
+
+
 def build_deployment_command(raw: str) -> str:
     base = str(application_settings()["public_base_url"]).rstrip("/")
     return (
@@ -4765,6 +4778,7 @@ def create_deployment_token(
     client_id: int,
     csrf_token: str = Form(...),
     run_initial_backup: str | None = Form(None),
+    rotate_ssh_key: str | None = Form(None),
 ):
     user = require_user(request, admin=True)
     verify_csrf(user, csrf_token)
@@ -4775,19 +4789,23 @@ def create_deployment_token(
         if not client:
             raise HTTPException(404)
         start_immediately = bool(run_initial_backup)
+        # A fresh key pair only makes sense for a source that already holds one;
+        # a first deployment generates its key anyway.
+        rotate_key = bool(rotate_ssh_key) and client_already_deployed(client)
         connection.execute(
             "UPDATE clients SET run_initial_backup=? WHERE id=?",
             (start_immediately, client_id),
         )
         connection.execute("DELETE FROM deployment_tokens WHERE client_id=? AND used_at IS NULL", (client_id,))
         connection.execute(
-            "INSERT INTO deployment_tokens(token_hash,client_id,token_ciphertext,expires_at,created_by,created_at) "
-            "VALUES(?,?,?,?,?,?)",
+            "INSERT INTO deployment_tokens(token_hash,client_id,token_ciphertext,expires_at,rotate_ssh_key,"
+            "created_by,created_at) VALUES(?,?,?,?,?,?,?)",
             (
                 token_hash(raw),
                 client_id,
                 encrypt_deployment_token(raw),
                 now_ts() + minutes * 60,
+                rotate_key,
                 user["id"],
                 now_iso(),
             ),
@@ -4797,7 +4815,7 @@ def create_deployment_token(
         request,
         "deployment_token.create",
         client["slug"],
-        f"expires={minutes}m initial_backup={start_immediately}",
+        f"expires={minutes}m initial_backup={start_immediately} rotate_ssh_key={rotate_key}",
     )
     return RedirectResponse(f"/clients/{client_id}/deployment", status_code=303)
 
@@ -4816,9 +4834,11 @@ def deployment_command_page(request: Request, client_id: int):
         raise HTTPException(404)
     command = ""
     expires_at = ""
+    rotate_key = False
     if token:
         command = build_deployment_command(decrypt_deployment_token(token["token_ciphertext"]))
         expires_at = datetime.fromtimestamp(token["expires_at"], timezone.utc).astimezone().strftime("%d.%m.%Y %H:%M:%S %Z")
+        rotate_key = bool(token["rotate_ssh_key"])
         audit(request, "deployment_token.view", client["slug"], f"expires_at={expires_at}")
     return render(
         request,
@@ -4829,6 +4849,8 @@ def deployment_command_page(request: Request, client_id: int):
             "minutes": int(application_settings()["deployment_token_minutes"]),
             "expires_at": expires_at,
             "start_immediately": bool(client["run_initial_backup"]),
+            "rotate_ssh_key": rotate_key,
+            "already_deployed": client_already_deployed(client),
         },
     )
 
@@ -4901,11 +4923,12 @@ def deployment_for_token(raw: str) -> tuple[sqlite3.Row, sqlite3.Row]:
 @app.get("/bootstrap", response_class=PlainTextResponse)
 def bootstrap(request: Request):
     raw = bearer(request)
-    _, client = deployment_for_token(raw)
+    token, client = deployment_for_token(raw)
     source = Path(CONFIG["paths"]["bootstrap_script"]).read_text(encoding="utf-8")
     prefix = (
         f"PORTAL_URL = {str(application_settings()['public_base_url']).rstrip('/')!r}\n"
         f"DEPLOYMENT_TOKEN = {raw!r}\nCLIENT_SLUG = {client['slug']!r}\n"
+        f"ROTATE_SSH_KEY = {bool(token['rotate_ssh_key'])!r}\n"
     )
     return PlainTextResponse(prefix + source, headers={"Content-Disposition": "inline", "X-Content-Type-Options": "nosniff"})
 
@@ -4989,7 +5012,13 @@ async def onboard_register(request: Request):
     ssh_config = f"Host {alias}\n    HostName {settings['fqdn']}\n    Port {int(settings['backup_ssh_port'])}\n    User {client['username']}\n    IdentityFile /root/.ssh/raven_backup_{client['slug']}\n    IdentitiesOnly yes\n    Compression yes\n    BatchMode yes\n    StrictHostKeyChecking yes\n"
     backup_config = build_agent_config(client, source_hostname, has_mariadb, agent_token).encode("utf-8")
     cron_line = "* * * * * /usr/bin/python3 -u /root/backup --config /root/backup-job.toml --poll >> /var/log/raven-backup.log 2>&1"
-    audit(request, "client.onboard", client["slug"], f"source={source_hostname}")
+    audit(
+        request,
+        "client.onboard",
+        client["slug"],
+        f"source={source_hostname} redeploy={client_already_deployed(client)} "
+        f"rotate_ssh_key={bool(token['rotate_ssh_key'])}",
+    )
     return JSONResponse(
         {
             "backup_script_b64": base64.b64encode(backup_script).decode(),
