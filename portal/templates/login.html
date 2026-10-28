@@ -13,5 +13,9 @@
     <label>Passwort<input type="password" name="password" autocomplete="current-password" required></label>
     <button class="primary" type="submit">Sicher anmelden</button>
   </form>
+  <div class="stack passkey-login">
+    <div class="alert error" id="passkey-error" hidden></div>
+    <button type="button" class="secondary" id="passkey-login" hidden>Mit Passkey anmelden</button>
+  </div>
 </section>
 {% endblock %}

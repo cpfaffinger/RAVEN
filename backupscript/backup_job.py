@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified, direct-to-SSH filesystem and MariaDB backup job."""
+"""Unified, direct-to-SSH filesystem, MariaDB and PostgreSQL backup job."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import html
 import json
 import logging
 import os
+import pwd
 import re
 import shlex
 import smtplib
@@ -130,6 +131,8 @@ def apply_command_policy(cfg: dict[str, Any], command: dict[str, Any]) -> None:
     cfg["backup"]["mariadb_databases_enabled"] = databases_enabled
     cfg["backup"]["mariadb_users_enabled"] = users_enabled
     cfg["backup"]["mariadb_enabled"] = databases_enabled or users_enabled
+    cfg["backup"]["postgresql_databases_enabled"] = bool(policy.get("postgresql_databases_enabled", False))
+    cfg["backup"]["postgresql_roles_enabled"] = bool(policy.get("postgresql_roles_enabled", False))
 
 
 class BoundedLogHandler(logging.Handler):
@@ -275,6 +278,9 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
     mariadb_databases_enabled = bool(backup.get("mariadb_databases_enabled", legacy_mariadb_enabled))
     mariadb_users_enabled = bool(backup.get("mariadb_users_enabled", legacy_mariadb_enabled))
     mariadb_enabled = mariadb_databases_enabled or mariadb_users_enabled
+    postgresql_enabled = bool(backup.get("postgresql_databases_enabled", False)) or bool(
+        backup.get("postgresql_roles_enabled", False)
+    )
     required = ["rsync", "ssh", "zstd", "du"]
     if any(item["mode"] == "tar" for item in configured_backup_paths(cfg)):
         required.append("tar")
@@ -320,11 +326,16 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
     version = mariadb_query("SELECT VERSION()") if mariadb_enabled else [["deaktiviert"]]
     if mariadb_enabled and not version:
         raise RuntimeError("lokale MariaDB ist nicht per Unix-Socket erreichbar")
+    postgres = postgres_instances() if postgresql_enabled else []
+    excluded_paths = dumped_data_directories(cfg, postgres)
     source_estimated_bytes = 0
     for item in configured_backup_paths(cfg):
         source = item["source_path"]
         proc = run(["/usr/bin/du", "-sb", "--", source], capture=True, timeout=900)
         source_estimated_bytes += int(proc.stdout.split()[0])
+        for path in excluded_below(source, excluded_paths):
+            skipped = run(["/usr/bin/du", "-sb", "--", f"{source}/{path}"], capture=True, timeout=900)
+            source_estimated_bytes -= int(skipped.stdout.split()[0])
     database_estimated_bytes = 0
     if mariadb_databases_enabled:
         db_size_rows = mariadb_query(
@@ -332,6 +343,9 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
             "WHERE table_schema NOT IN ('information_schema','performance_schema','mysql','sys')"
         )
         database_estimated_bytes = int(db_size_rows[0][0])
+    if bool(backup.get("postgresql_databases_enabled", False)):
+        for instance in postgres:
+            database_estimated_bytes += sum(postgres_database_inventory(instance)[1].values())
     estimated_upper_bound = source_estimated_bytes + database_estimated_bytes
     required_free = minimum_free + estimated_upper_bound
     if available_bytes < required_free:
@@ -340,7 +354,8 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
             f"mindestens {format_size(required_free)} fuer Worst-Case-Backup plus Reserve erforderlich"
         )
     LOG.info(
-        "Preflight OK: source=%s target=%s@%s:%s remote_home=%s free=%s estimated=%s reserve=%s mariadb=%s",
+        "Preflight OK: source=%s target=%s@%s:%s remote_home=%s free=%s estimated=%s reserve=%s mariadb=%s "
+        "postgresql=%s",
         actual_source,
         expected_values["user"],
         expected_values["hostname"],
@@ -350,6 +365,8 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
         format_size(estimated_upper_bound),
         format_size(minimum_free),
         version[0][0],
+        ", ".join(f"{item['label']} {item['version']}" for item in postgres)
+        or ("keine Instanz gefunden" if postgresql_enabled else "deaktiviert"),
     )
     return {
         "remote_home": remote_home,
@@ -359,6 +376,7 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
         "mariadb_enabled": mariadb_enabled,
         "mariadb_databases_enabled": mariadb_databases_enabled,
         "mariadb_users_enabled": mariadb_users_enabled,
+        "postgresql_instances": postgres,
     }
 
 
@@ -606,6 +624,8 @@ def compact_portal_report(report: dict[str, Any] | None, error: BaseException | 
     if report:
         mariadb = dict(report.get("mariadb", {}))
         mariadb.pop("databases", None)
+        postgresql = dict(report.get("postgresql", {}))
+        postgresql.pop("instances", None)
         return {
             "status": report.get("status"),
             "run_id": report.get("run_id"),
@@ -617,6 +637,7 @@ def compact_portal_report(report: dict[str, Any] | None, error: BaseException | 
             "classifications": report.get("classifications"),
             "filesystem": report.get("filesystem"),
             "mariadb": mariadb,
+            "postgresql": postgresql,
         }
     if error:
         return {
@@ -901,6 +922,223 @@ def backup_databases(cfg: dict[str, Any], run_dir: str) -> dict[str, Any]:
     return report
 
 
+POSTGRES_SOCKET_DIR = Path("/var/run/postgresql")
+POSTGRES_DOCKER_ENV_KEYS = {"PGDATA", "PG_MAJOR", "PG_VERSION"}
+# Inside a container the superuser is whatever the image was started with;
+# the official images and their derivatives publish it as POSTGRES_USER.
+POSTGRES_DOCKER_WRAPPER = 'PGUSER="${POSTGRES_USER:-postgres}" exec "$0" "$@"'
+POSTGRES_LIST_DATABASES = (
+    "SELECT datname, pg_database_size(datname) FROM pg_database "
+    "WHERE datallowconn AND NOT datistemplate ORDER BY datname"
+)
+
+
+def postgres_command(instance: dict[str, Any], program: str, *args: str) -> list[str]:
+    """Return the command that runs one PostgreSQL client program for an instance."""
+    if instance["kind"] == "docker":
+        return [
+            "/usr/bin/docker", "exec", instance["container"],
+            "sh", "-c", POSTGRES_DOCKER_WRAPPER, program, *args,
+        ]
+    return [instance["runuser"], "-u", "postgres", "--", program, *args]
+
+
+def postgres_conninfo(database: str) -> str:
+    """Name a database as a conninfo string.
+
+    pg_dump reads a --dbname containing "=" as connection parameters; quoting
+    the name keeps an unusual database name from turning into one.
+    """
+    escaped = database.replace("\\", "\\\\").replace("'", r"\'")
+    return f"dbname='{escaped}'"
+
+
+def postgres_query(instance: dict[str, Any], sql: str) -> list[list[str]]:
+    args = postgres_command(
+        instance, "psql", "--no-password", "--no-psqlrc", "--quiet", "--tuples-only",
+        "--no-align", "--field-separator=\t", "--dbname=postgres", "--command", sql,
+    )
+    proc = run(args, capture=True, timeout=120)
+    return [line.split("\t") for line in proc.stdout.splitlines() if line]
+
+
+def docker_postgres_containers() -> list[str]:
+    """Name the running containers whose image is a PostgreSQL server.
+
+    The environment of the image decides, not its name, so derivatives such as
+    PostGIS or TimescaleDB are found as well as the official image.
+    """
+    if not Path("/usr/bin/docker").exists():
+        return []
+    listing = run(["/usr/bin/docker", "ps", "--format", "{{.Names}}"], capture=True, timeout=60, check=False)
+    if listing.returncode != 0:
+        LOG.warning("Docker-Container konnten nicht gelistet werden: %s", (listing.stderr or "").strip()[:300])
+        return []
+    found: list[str] = []
+    for name in sorted(line.strip() for line in listing.stdout.splitlines() if line.strip()):
+        inspect = run(
+            ["/usr/bin/docker", "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", name],
+            capture=True, timeout=60, check=False,
+        )
+        keys = {line.split("=", 1)[0] for line in inspect.stdout.splitlines() if "=" in line}
+        if inspect.returncode == 0 and keys & POSTGRES_DOCKER_ENV_KEYS:
+            found.append(name)
+    return found
+
+
+def postgres_instances() -> list[dict[str, Any]]:
+    """Find the PostgreSQL servers on this host: the local cluster and containers.
+
+    An instance that is clearly present but refuses the connection fails the
+    backup, the same way an unreachable MariaDB does; silently leaving a
+    database out would look like a complete backup.
+    """
+    instances: list[dict[str, Any]] = []
+    runuser = next((path for path in ("/usr/sbin/runuser", "/sbin/runuser") if Path(path).exists()), None)
+    has_socket = POSTGRES_SOCKET_DIR.is_dir() and any(POSTGRES_SOCKET_DIR.glob(".s.PGSQL.*"))
+    if has_socket and runuser and Path("/usr/bin/pg_dump").exists():
+        try:
+            pwd.getpwnam("postgres")
+            instances.append({"name": "local", "kind": "local", "runuser": runuser, "label": "lokaler Cluster"})
+        except KeyError:
+            LOG.warning("PostgreSQL-Socket vorhanden, aber kein Systembenutzer postgres; lokaler Cluster wird uebersprungen")
+    for container in docker_postgres_containers():
+        probe = run(
+            ["/usr/bin/docker", "exec", container, "sh", "-c", "command -v pg_dump && command -v pg_dumpall"],
+            capture=True, timeout=60, check=False,
+        )
+        if probe.returncode != 0:
+            LOG.info("Container %s sieht nach PostgreSQL aus, enthaelt aber kein pg_dump; uebersprungen", container)
+            continue
+        instances.append({
+            "name": "docker_" + re.sub(r"[^A-Za-z0-9_.-]", "_", container),
+            "kind": "docker",
+            "container": container,
+            "label": f"Docker-Container {container}",
+        })
+    for instance in instances:
+        try:
+            version = postgres_query(instance, "SHOW server_version")
+            data_directory = postgres_query(instance, "SHOW data_directory")
+        except RuntimeError as exc:
+            raise RuntimeError(f"PostgreSQL {instance['label']} ist nicht erreichbar: {exc}") from exc
+        instance["version"] = version[0][0] if version else "unbekannt"
+        directory = data_directory[0][0] if data_directory else ""
+        instance["data_directory"] = (
+            docker_host_path(instance["container"], directory) if instance["kind"] == "docker" else directory
+        ) or None
+    return instances
+
+
+def docker_host_path(container: str, path: str) -> str | None:
+    """Translate a path inside a container to the host path of its bind mount."""
+    if not path.startswith("/"):
+        return None
+    inspect = run(
+        ["/usr/bin/docker", "inspect", "--format",
+         "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Destination}}\t{{.Source}}{{println}}{{end}}{{end}}",
+         container],
+        capture=True, timeout=60, check=False,
+    )
+    best: tuple[str, str] | None = None
+    for line in inspect.stdout.splitlines():
+        destination, _, source = line.partition("\t")
+        destination = destination.rstrip("/") or "/"
+        inside = path == destination or path.startswith(destination.rstrip("/") + "/")
+        if source and inside and (best is None or len(destination) > len(best[0])):
+            best = (destination, source)
+    if best is None:
+        return None
+    remainder = path[len(best[0]):].lstrip("/")
+    return str(Path(best[1]) / remainder) if remainder else best[1]
+
+
+def dumped_data_directories(cfg: dict[str, Any], instances: list[dict[str, Any]]) -> list[str]:
+    """Return the data directories whose content the database dumps already cover.
+
+    A running server rewrites these files while tar reads them, so the raw copy
+    is neither consistent nor needed next to a pg_dump of every database.
+    """
+    if not bool(cfg["backup"].get("postgresql_databases_enabled", False)):
+        return []
+    return sorted({str(item["data_directory"]) for item in instances if item.get("data_directory")})
+
+
+def postgres_database_inventory(instance: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
+    rows = postgres_query(instance, POSTGRES_LIST_DATABASES)
+    sizes = {row[0]: int(row[1]) for row in rows if len(row) >= 2}
+    return sorted(sizes), sizes
+
+
+def backup_postgresql(
+    cfg: dict[str, Any], run_dir: str, instances: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Dump every database and the global objects of each PostgreSQL instance.
+
+    pg_dump works from one snapshot per database, so the dump is consistent
+    while the server keeps running, unlike a copy of its data directory. The
+    plain SQL format keeps the archives readable in the explorer and restorable
+    with psql alone.
+    """
+    backup = cfg["backup"]
+    attempts = int(backup.get("stream_attempts", 2))
+    databases_enabled = bool(backup.get("postgresql_databases_enabled", False))
+    roles_enabled = bool(backup.get("postgresql_roles_enabled", False))
+    report: dict[str, Any] = {
+        "databases_enabled": databases_enabled,
+        "roles_enabled": roles_enabled,
+        "instance_count": len(instances),
+        "database_count": 0,
+        "estimated_bytes": 0,
+        "compressed_bytes": 0,
+        "roles_bytes": 0,
+        "data_compressed_bytes": 0,
+        "instances": {},
+    }
+    for instance in instances:
+        base = f"{run_dir}/postgresql/{instance['name']}"
+        entry: dict[str, Any] = {
+            "label": instance["label"],
+            "version": instance.get("version"),
+            "roles_bytes": 0,
+            "databases": {},
+        }
+        if roles_enabled:
+            destination = f"{base}/globals.sql.zst"
+            LOG.info("PostgreSQL %s: Rollen und Rechte", instance["label"])
+            stream_compressed(
+                cfg,
+                postgres_command(instance, "pg_dumpall", "--no-password", "--globals-only"),
+                destination,
+                attempts=attempts,
+            )
+            entry["roles_bytes"] = remote_file_size(cfg, destination)
+            report["roles_bytes"] += entry["roles_bytes"]
+        if databases_enabled:
+            databases, sizes = postgres_database_inventory(instance)
+            for index, db in enumerate(databases, start=1):
+                estimated = sizes.get(db, 0)
+                LOG.info(
+                    "PostgreSQL %s %d/%d: %s (%s geschaetzt)",
+                    instance["label"], index, len(databases), db, format_size(estimated),
+                )
+                destination = f"{base}/databases/{quote(db, safe='._-')}.sql.zst"
+                stream_compressed(
+                    cfg,
+                    postgres_command(instance, "pg_dump", "--no-password", f"--dbname={postgres_conninfo(db)}"),
+                    destination,
+                    attempts=attempts,
+                )
+                stored = remote_file_size(cfg, destination)
+                entry["databases"][db] = {"estimated_bytes": estimated, "data_bytes": stored}
+                report["database_count"] += 1
+                report["estimated_bytes"] += estimated
+                report["data_compressed_bytes"] += stored
+        report["compressed_bytes"] = report["roles_bytes"] + report["data_compressed_bytes"]
+        report["instances"][instance["name"]] = entry
+    return report
+
+
 def find_previous_backup(cfg: dict[str, Any], remote_home: str) -> str | None:
     command = (
         f"find {shlex.quote(remote_home)} -mindepth 2 -maxdepth 2 -type f -name .backup-ok "
@@ -911,8 +1149,20 @@ def find_previous_backup(cfg: dict[str, Any], remote_home: str) -> str | None:
     return value or None
 
 
+def excluded_below(source: str, excluded_paths: list[str]) -> list[str]:
+    """Return the excluded paths below one source, relative to that source."""
+    base = Path(source)
+    relative: list[str] = []
+    for path in excluded_paths:
+        candidate = Path(path)
+        if candidate != base and base in candidate.parents:
+            relative.append(candidate.relative_to(base).as_posix())
+    return sorted(relative)
+
+
 def rsync_source(
-    cfg: dict[str, Any], source: str, destination: str, previous: str | None, attempts: int
+    cfg: dict[str, Any], source: str, destination: str, previous: str | None, attempts: int,
+    excluded: list[str] | None = None,
 ) -> None:
     ssh_transport = shlex.join(["/usr/bin/ssh", *ssh_options(cfg)])
     args = [
@@ -923,12 +1173,14 @@ def rsync_source(
     ]
     if previous:
         args.append(f"--link-dest={previous}")
+    args.extend(f"--exclude=/{path}/" for path in excluded or [])
     args.extend([source.rstrip("/") + "/", f"{cfg['backup']['ssh_target']}:{destination.rstrip('/')}/"])
     retry(f"rsync {source}", attempts, lambda: run(args))
 
 
 def backup_filesystems(
-    cfg: dict[str, Any], remote_home: str, run_dir: str, previous_run: str | None
+    cfg: dict[str, Any], remote_home: str, run_dir: str, previous_run: str | None,
+    excluded_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     backup = cfg["backup"]
     attempts = int(backup.get("rsync_attempts", 3))
@@ -941,11 +1193,14 @@ def backup_filesystems(
             raise RuntimeError(f"Backupquelle fehlt oder ist kein Ordner: {source}")
         logical_proc = run(["/usr/bin/du", "-sb", "--", source], capture=True, timeout=900)
         logical_bytes = int(logical_proc.stdout.split()[0])
+        excluded = excluded_below(source, excluded_paths or [])
+        for path in excluded:
+            LOG.info("%s/%s ausgelassen: Datenverzeichnis ist durch den PostgreSQL-Dump gesichert", source, path)
         if mode == "sync":
             destination = f"{remote_home}/current/{name}"
             LOG.info("Current-Sync %s -> %s", source, destination)
             ssh(cfg, f"umask 077; mkdir -p {shlex.quote(destination)}", timeout=60)
-            rsync_source(cfg, source, destination, None, attempts)
+            rsync_source(cfg, source, destination, None, attempts, excluded)
             size_proc = ssh(cfg, f"du -sb -- {shlex.quote(destination)}", capture=True, timeout=600)
             stored_bytes = int(size_proc.stdout.split()[0])
         else:
@@ -957,9 +1212,13 @@ def backup_filesystems(
             # read. The archive is complete and readable, and a live system such
             # as a database directory does that on every run, so retrying cannot
             # help; only exit 2 and above are real errors.
+            exclude_args = [f"--exclude={leaf}/{path}" for path in excluded]
+            if exclude_args:
+                exclude_args[:0] = ["--anchored", "--no-wildcards"]
             stream_compressed(
                 cfg,
-                ["/usr/bin/tar", "--acls", "--xattrs", "--numeric-owner", "-C", parent, "-cf", "-", leaf],
+                ["/usr/bin/tar", "--acls", "--xattrs", "--numeric-owner", *exclude_args,
+                 "-C", parent, "-cf", "-", leaf],
                 destination,
                 attempts=attempts,
                 tolerated_exit_codes=frozenset({1}),
@@ -972,6 +1231,7 @@ def backup_filesystems(
             "logical_bytes": logical_bytes,
             "stored_bytes": stored_bytes,
             "persistent": mode != "sync",
+            "excluded": excluded,
         }
     return report
 
@@ -1139,8 +1399,13 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
             "users_enabled": False,
             "disabled": True,
         }
+    CURRENT_PHASE = "postgresql"
+    pg_report = backup_postgresql(cfg, run_dir, preflight_result["postgresql_instances"])
     CURRENT_PHASE = "filesystem"
-    fs_report = backup_filesystems(cfg, remote_home, run_dir, previous)
+    fs_report = backup_filesystems(
+        cfg, remote_home, run_dir, previous,
+        dumped_data_directories(cfg, preflight_result["postgresql_instances"]),
+    )
     CURRENT_PHASE = "finalize"
     size_proc = ssh(cfg, f"du -sb -- {shlex.quote(run_dir)}", capture=True, timeout=1800)
     run_bytes = int(size_proc.stdout.split()[0])
@@ -1181,6 +1446,21 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
             "file_count": db_report["data_file_count"],
             "split_database_count": db_report["split_database_count"],
         },
+        "postgresql_roles": {
+            "label": "PostgreSQL Rollen und Rechte",
+            "kind": "postgresql-roles",
+            "enabled": pg_report["roles_enabled"],
+            "compressed_bytes": pg_report["roles_bytes"],
+            "instance_count": pg_report["instance_count"],
+        },
+        "postgresql_data": {
+            "label": "PostgreSQL Datenbanken",
+            "kind": "postgresql-data",
+            "enabled": pg_report["databases_enabled"],
+            "estimated_bytes": pg_report["estimated_bytes"],
+            "compressed_bytes": pg_report["data_compressed_bytes"],
+            "file_count": pg_report["database_count"],
+        },
     })
     report = {
         "status": "ok",
@@ -1193,7 +1473,7 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
         "logical_run_bytes": run_bytes,
         "protected_logical_bytes": sum(
             int(item["logical_bytes"]) for item in fs_report["sources"].values()
-        ) + int(db_report["estimated_bytes"]),
+        ) + int(db_report["estimated_bytes"]) + int(pg_report["estimated_bytes"]),
         "previous_successful_backup": previous,
         "content_hashes": run_content_hashes(run_dir),
         "run_content_sha256": run_content_fingerprint(run_dir),
@@ -1203,6 +1483,7 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
             "paths": configured_backup_paths(cfg),
         },
         "mariadb": db_report,
+        "postgresql": pg_report,
         "filesystem": fs_report,
         "classifications": classifications,
     }
@@ -1265,6 +1546,12 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
                  else "durch Policy deaktiviert"),
             ),
             ("Tabellen-Fallback", f"{db_report['split_database_count']} Datenbanken"),
+            (
+                "PostgreSQL",
+                (f"{pg_report['database_count']} Datenbanken in {pg_report['instance_count']} Instanzen, "
+                 f"{format_size(pg_report['compressed_bytes'])} komprimiert"
+                 if pg_report["databases_enabled"] or pg_report["roles_enabled"] else "durch Policy deaktiviert"),
+            ),
             ("Vorheriges Backup", previous or "keines"),
         ])
         try:

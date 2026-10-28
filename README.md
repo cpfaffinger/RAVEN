@@ -10,10 +10,11 @@ RAVEN verbindet ein TLS-geschütztes Verwaltungsportal mit einem schlanken Pytho
 - zentral gepflegte Wunschzeit und Backup-Intervall je Policy, die der Agent bei jedem Abruf live übernimmt
 - je Policy einstellbar, bei welchen Backup-Ereignissen eine Mail entsteht, und je Checker-Lauf, bei welchen Prüfergebnissen
 - MariaDB-Dumps einschließlich optionaler Benutzer und Rechte
+- PostgreSQL-Dumps lokaler Cluster und automatisch erkannter Docker-Container einschließlich Rollen
 - zentrales Scheduling mit zufälligem Startversatz, Laufstatus, Protokolle, Rotation und Speicherwarnungen
 - Erkennung unveränderter Sicherungen über SHA-256-Prüfsummen statt über die Byte-Größe
 - Backup Explorer für Verzeichnisse, Zstandard-Archive und einzelne Downloads
-- lokale Benutzer und Rollen, kurzlebige Deployment-Tokens sowie isolierte SSH-Zielkonten
+- lokale Benutzer und Rollen, Anmeldung per Passwort oder Passkey, kurzlebige Deployment-Tokens sowie isolierte SSH-Zielkonten
 - integriertes SQLite, Plain-SMTP-Benachrichtigungen und Let's Encrypt per Cloudflare- oder manueller DNS-01-Challenge
 - Replikation des gesamten Bestands auf beliebig viele Spiegelserver mit eigenem Intervall und eigener Aufbewahrung
 - Aktivitätsfeed auf der Übersicht über eingegangene Backups, Checkerläufe und Verwaltungsaktionen
@@ -45,6 +46,7 @@ RAVEN ist für einen dedizierten Backup-Zielserver vorgesehen. Das Portal läuft
 Alle vom Betreiber verwalteten Secrets lassen sich im Webinterface setzen oder rotieren:
 
 - Portal-Benutzerpasswörter unter **Einstellungen → Benutzer**
+- eigene Passkeys unter **Konto & Passkeys**
 - SMTP-Benutzer und -Passwort unter **Einstellungen → SMTP**
 - Cloudflare API-Token unter **Einstellungen → Zertifikate**; der Wert wird nach dem Speichern nie wieder angezeigt
 - Deployment- und Agent-Tokens werden vom Portal erzeugt und nicht als Klartext in SQLite gespeichert
@@ -275,6 +277,33 @@ Filterregeln sind auf die auswertenden Typen begrenzt (`P`/`protect`, `+`/`inclu
 Ein eigener Portal-Worker führt immer nur eine Replikation gleichzeitig aus. Zu Beginn jedes Laufs wird der freie Speicher des Ziels über `df` ermittelt und in der Oberfläche ausgewiesen. Status, Dauer, übertragenes Volumen und die vollständige rsync-Ausgabe stehen je Lauf zur Verfügung, ein Lauf lässt sich jederzeit manuell auslösen, und die Ergebnisse erscheinen zusätzlich im Aktivitätsfeed der Übersicht. rsync-Status 24 gilt als Erfolg: er bedeutet nur, dass während des Laufs eine Datei verschwunden ist, was auf einem aktiven Backupbestand regelmäßig vorkommt.
 
 Wird ein Ziel im Portal entfernt, verschwinden Zugangsdaten, Zeitplan und Historie – die bereits replizierten Daten auf dem Spiegel bleiben liegen.
+
+## Anmeldung mit Passkey
+
+Jeder Benutzer kann unter **Konto & Passkeys** beliebig viele Passkeys (bis zu 20) registrieren und danach auf der Anmeldeseite **Mit Passkey anmelden** wählen, ohne Benutzername und Passwort. Freigegeben wird mit Fingerabdruck, Gesicht oder Geräte-PIN; ohne diese Benutzerverifikation lehnt das Portal einen Passkey ab. Passwort-Login und Sperren über **Einstellungen → Benutzer** funktionieren unverändert weiter, und ein deaktivierter Benutzer kommt auch mit Passkey nicht hinein.
+
+Ein Passkey ist an den Portal-FQDN als Relying Party und an den exakten Ursprung samt HTTPS-Port gebunden. Nach einem Domainwechsel müssen Passkeys daher neu registriert werden. Das Portal speichert nur den öffentlichen Schlüssel und einen Signaturzähler; ein Zähler, der bei einem Gerät mit eigenem Zähler nicht steigt, deutet auf einen kopierten Schlüssel und führt zur Ablehnung. Attestierungen werden bewusst nicht ausgewertet (`attestation: none`), weil sich nur ein bereits angemeldeter Benutzer einen Passkey hinzufügen kann. Die Prüfung steckt in `portal/webauthn.py` und benötigt außer `cryptography` keine weitere Bibliothek.
+
+## PostgreSQL
+
+Policies sichern neben MariaDB auch PostgreSQL, getrennt nach **Datenbanken** und **Rollen und Rechte**; beides ist für bestehende Policies aktiv. Der Agent sucht bei jedem Lauf selbst nach Instanzen:
+
+- einen lokalen Cluster, wenn ein Socket unter `/var/run/postgresql` liegt; Zugriff per `runuser -u postgres` über Peer-Authentifizierung
+- laufende Docker-Container, deren Image ein PostgreSQL-Server ist (Umgebung mit `PGDATA`, `PG_MAJOR` oder `PG_VERSION`, also auch PostGIS oder TimescaleDB); Zugriff per `docker exec` als der im Container gesetzte `POSTGRES_USER`
+
+Je Instanz entstehen `postgresql/<instanz>/globals.sql.zst` (`pg_dumpall --globals-only`) und für jede Datenbank `postgresql/<instanz>/databases/<name>.sql.zst` (`pg_dump`, Klartext-SQL). `pg_dump` liest aus einem Snapshot und ist damit auch bei laufendem Server konsistent. Ist eine gefundene Instanz nicht erreichbar, schlägt das Backup fehl, statt still eine Datenbank auszulassen. Server ohne PostgreSQL bleiben unberührt.
+
+Liegt das Datenverzeichnis einer gedumpten Instanz unterhalb eines Policy-Pfads – etwa ein Bind-Mount unter `/etc/docker/compose/…` –, lässt der Agent es im Archiv bzw. im Current-Sync aus und vermerkt das im Laufprotokoll. Eine Kopie der laufenden Datenbankdateien wäre ohnehin nicht konsistent und würde den Platz verdoppeln.
+
+Wiederherstellen:
+
+```sh
+zstd -dc globals.sql.zst | psql -U postgres            # Rollen zuerst
+createdb -U postgres zieldatenbank
+zstd -dc databases/app.sql.zst | psql -U postgres -d zieldatenbank
+```
+
+Für TimescaleDB vor dem Einspielen `SELECT timescaledb_pre_restore();` und danach `SELECT timescaledb_post_restore();` in der Zieldatenbank ausführen.
 
 ## Veränderung erkennen
 

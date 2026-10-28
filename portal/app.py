@@ -41,6 +41,7 @@ from starlette.background import BackgroundTask
 
 import backup_schedule
 import mirror as mirror_module
+import webauthn as passkeys
 from domain_config import resolve_domain_config
 from runtime_config import bootstrap_settings, effective_settings, runtime_config
 
@@ -75,6 +76,12 @@ HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}[A-Za-z0-9]$")
 PUBLIC_KEY_RE = re.compile(r"^ssh-ed25519 ([A-Za-z0-9+/]+={0,3})(?:\s+.*)?$")
 POLICY_TARGET_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 LOGIN_FAILURES: dict[str, list[float]] = {}
+# Open passkey ceremonies, keyed by a random flow id the browser sends back.
+# They live in memory only: a portal restart merely asks the user to try again.
+PASSKEY_FLOWS: dict[str, dict[str, Any]] = {}
+PASSKEY_FLOW_LOCK = threading.Lock()
+PASSKEY_FLOW_SECONDS = 300
+PASSKEY_LIMIT_PER_USER = 20
 SCHEDULER_STOP = threading.Event()
 SCHEDULER_THREAD: threading.Thread | None = None
 CHECKER_STOP = threading.Event()
@@ -585,7 +592,17 @@ def init_db() -> None:
                 "UPDATE clients SET last_success_at="
                 "(SELECT MAX(created_at) FROM status_events WHERE client_id=clients.id AND event='success')"
             )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS webauthn_credentials ("
+            "id INTEGER PRIMARY KEY, "
+            "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+            "credential_id TEXT UNIQUE NOT NULL, public_key BLOB NOT NULL, algorithm INTEGER NOT NULL, "
+            "sign_count INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL, aaguid TEXT NOT NULL DEFAULT '', "
+            "transports TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_used_at TEXT)"
+        )
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        if "webauthn_handle" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN webauthn_handle TEXT")
         if "email" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
         if "receive_notifications" not in user_columns:
@@ -607,6 +624,16 @@ def init_db() -> None:
         if "mariadb_users_enabled" not in policy_columns:
             connection.execute("ALTER TABLE backup_policies ADD COLUMN mariadb_users_enabled INTEGER NOT NULL DEFAULT 1")
             connection.execute("UPDATE backup_policies SET mariadb_users_enabled=mariadb_enabled")
+        # Existing policies take PostgreSQL along right away: the agent only
+        # dumps instances it actually finds, so hosts without one are unaffected.
+        if "postgresql_databases_enabled" not in policy_columns:
+            connection.execute(
+                "ALTER TABLE backup_policies ADD COLUMN postgresql_databases_enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        if "postgresql_roles_enabled" not in policy_columns:
+            connection.execute(
+                "ALTER TABLE backup_policies ADD COLUMN postgresql_roles_enabled INTEGER NOT NULL DEFAULT 1"
+            )
         migrate_policy_schedule(connection, policy_columns, client_columns, portal_defaults)
         migrate_policy_notifications(connection, policy_columns, client_columns)
         cleanup_defaults = checker_cleanup_configuration()
@@ -974,6 +1001,7 @@ NAV_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("smtp", ("/settings/smtp",)),
     ("certificates", ("/certificates",)),
     ("users", ("/users",)),
+    ("account", ("/account",)),
     ("manual", ("/manual",)),
     ("servers", ("/", "/clients")),
 )
@@ -1062,6 +1090,8 @@ def policy_payload(connection: sqlite3.Connection, policy_id: int | None) -> dic
         "mariadb_enabled": bool(policy["mariadb_databases_enabled"] or policy["mariadb_users_enabled"]),
         "mariadb_databases_enabled": bool(policy["mariadb_databases_enabled"]),
         "mariadb_users_enabled": bool(policy["mariadb_users_enabled"]),
+        "postgresql_databases_enabled": bool(policy["postgresql_databases_enabled"]),
+        "postgresql_roles_enabled": bool(policy["postgresql_roles_enabled"]),
         "schedule_hour": int(policy["schedule_hour"]),
         "schedule_minute": int(policy["schedule_minute"]),
         "interval_hours": int(policy["interval_hours"]),
@@ -2759,6 +2789,15 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
         time.sleep(0.4)
         return render(request, "login.html", {"error": "Benutzername oder Passwort ist falsch."}, 401)
     LOGIN_FAILURES.pop(ip, None)
+    audit(request, "login.success", username, user_id=user["id"])
+    response = RedirectResponse("/", status_code=303)
+    start_session(request, user, response)
+    return response
+
+
+def start_session(request: Request, user: sqlite3.Row, response: Any) -> None:
+    """Open a portal session for an authenticated user and set its cookie."""
+    ip = request.client.host if request.client else "unknown"
     raw = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
     expires = now_ts() + int(CONFIG["security"].get("session_hours", 12)) * 3600
@@ -2767,10 +2806,225 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
             "INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,ip,user_agent,created_at) VALUES(?,?,?,?,?,?,?)",
             (token_hash(raw), user["id"], csrf, expires, ip, request.headers.get("user-agent", "")[:500], now_iso()),
         )
-    audit(request, "login.success", username, user_id=user["id"])
-    response = RedirectResponse("/", status_code=303)
     response.set_cookie("backup_portal_session", raw, secure=True, httponly=True, samesite="strict", max_age=expires-now_ts(), path="/")
+
+
+def passkey_relying_party() -> tuple[str, str]:
+    """Return the RP ID and the exact origin passkeys are bound to.
+
+    The RP ID is the portal FQDN and the origin carries the HTTPS port as well,
+    so a passkey works on this portal only, never on another domain.
+    """
+    settings = application_settings()
+    return str(settings["fqdn"]), str(settings["public_base_url"]).rstrip("/")
+
+
+def open_passkey_flow(purpose: str, user_id: int | None = None) -> tuple[str, bytes]:
+    flow_id = secrets.token_urlsafe(24)
+    challenge = secrets.token_bytes(32)
+    now = time.time()
+    with PASSKEY_FLOW_LOCK:
+        for key in [key for key, flow in PASSKEY_FLOWS.items() if flow["expires"] < now]:
+            del PASSKEY_FLOWS[key]
+        if len(PASSKEY_FLOWS) > 1000:
+            raise HTTPException(429, "Zu viele offene Passkey-Anfragen")
+        PASSKEY_FLOWS[flow_id] = {
+            "purpose": purpose, "user_id": user_id, "challenge": challenge, "expires": now + PASSKEY_FLOW_SECONDS,
+        }
+    return flow_id, challenge
+
+
+def take_passkey_flow(flow_id: str, purpose: str, user_id: int | None = None) -> bytes:
+    """Consume a ceremony exactly once; a replayed or foreign flow is refused."""
+    with PASSKEY_FLOW_LOCK:
+        flow = PASSKEY_FLOWS.pop(str(flow_id), None)
+    if not flow or flow["expires"] < time.time() or flow["purpose"] != purpose or flow["user_id"] != user_id:
+        raise HTTPException(400, "Passkey-Anfrage ist abgelaufen; bitte erneut versuchen")
+    return flow["challenge"]
+
+
+def passkey_user_handle(connection: sqlite3.Connection, user: sqlite3.Row) -> str:
+    """Return the opaque handle authenticators store for a user, creating it once."""
+    handle = connection.execute("SELECT webauthn_handle FROM users WHERE id=?", (user["id"],)).fetchone()[0]
+    if not handle:
+        handle = passkeys.b64url_encode(secrets.token_bytes(32))
+        connection.execute("UPDATE users SET webauthn_handle=? WHERE id=?", (handle, user["id"]))
+    return str(handle)
+
+
+async def json_body(request: Request) -> dict[str, Any]:
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, "Ungueltiges JSON")
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Ungueltiges JSON")
+    return data
+
+
+@app.post("/login/passkey/options")
+def login_passkey_options(request: Request):
+    """Start a passwordless login with any passkey registered for this portal."""
+    rp_id, _origin = passkey_relying_party()
+    flow_id, challenge = open_passkey_flow("login")
+    return JSONResponse({
+        "flow": flow_id,
+        "publicKey": {
+            "challenge": passkeys.b64url_encode(challenge),
+            "rpId": rp_id,
+            "timeout": PASSKEY_FLOW_SECONDS * 1000,
+            "userVerification": "required",
+            "allowCredentials": [],
+        },
+    })
+
+
+@app.post("/login/passkey")
+async def login_passkey(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    recent = [stamp for stamp in LOGIN_FAILURES.get(ip, []) if time.time() - stamp < 900]
+    LOGIN_FAILURES[ip] = recent
+    if len(recent) >= 8:
+        audit(request, "login.rate_limited", "passkey")
+        return JSONResponse({"error": "Zu viele Versuche. Bitte spaeter erneut versuchen."}, status_code=429)
+    data = await json_body(request)
+    challenge = take_passkey_flow(str(data.get("flow", "")), "login")
+    rp_id, origin = passkey_relying_party()
+    credential_id = str(data.get("id", ""))
+    with db() as connection:
+        stored = connection.execute(
+            "SELECT c.*,u.username,u.webauthn_handle FROM webauthn_credentials c JOIN users u ON u.id=c.user_id "
+            "WHERE c.credential_id=? AND u.active=1",
+            (credential_id,),
+        ).fetchone()
+    try:
+        if not stored:
+            raise passkeys.WebAuthnError("Dieser Passkey ist im Portal nicht registriert")
+        user_handle = str(data.get("userHandle") or "")
+        if user_handle and user_handle != stored["webauthn_handle"]:
+            raise passkeys.WebAuthnError("Passkey gehoert zu einem anderen Benutzer")
+        sign_count = passkeys.verify_authentication(
+            client_data_json=passkeys.b64url_decode(str(data.get("clientDataJSON", ""))),
+            authenticator_data=passkeys.b64url_decode(str(data.get("authenticatorData", ""))),
+            signature=passkeys.b64url_decode(str(data.get("signature", ""))),
+            challenge=challenge, origin=origin, rp_id=rp_id,
+            public_key=bytes(stored["public_key"]), algorithm=int(stored["algorithm"]),
+            stored_sign_count=int(stored["sign_count"]),
+        )
+    except passkeys.WebAuthnError as exc:
+        LOGIN_FAILURES[ip].append(time.time())
+        audit(request, "login.passkey_failed", stored["username"] if stored else credential_id[:64], str(exc))
+        time.sleep(0.4)
+        return JSONResponse({"error": f"Anmeldung mit Passkey fehlgeschlagen: {exc}"}, status_code=401)
+    LOGIN_FAILURES.pop(ip, None)
+    with db() as connection:
+        connection.execute(
+            "UPDATE webauthn_credentials SET sign_count=?,last_used_at=? WHERE id=?",
+            (sign_count, now_iso(), stored["id"]),
+        )
+        user = connection.execute("SELECT * FROM users WHERE id=? AND active=1", (stored["user_id"],)).fetchone()
+    if not user:
+        return JSONResponse({"error": "Benutzer ist deaktiviert"}, status_code=401)
+    audit(request, "login.success", user["username"], f"passkey={stored['name']}", user_id=user["id"])
+    response = JSONResponse({"redirect": "/"})
+    start_session(request, user, response)
     return response
+
+
+def verify_csrf_header(request: Request, user: sqlite3.Row) -> None:
+    verify_csrf(user, request.headers.get("x-csrf-token", ""))
+
+
+@app.get("/account", response_class=HTMLResponse)
+def account_page(request: Request):
+    user = require_user(request)
+    with db() as connection:
+        credentials = connection.execute(
+            "SELECT id,name,created_at,last_used_at FROM webauthn_credentials WHERE user_id=? ORDER BY id",
+            (user["id"],),
+        ).fetchall()
+    return render(request, "account.html", {
+        "credentials": credentials,
+        "message": request.query_params.get("message", ""),
+    })
+
+
+@app.post("/account/passkeys/options")
+def passkey_register_options(request: Request):
+    user = require_user(request)
+    verify_csrf_header(request, user)
+    rp_id, _origin = passkey_relying_party()
+    with db() as connection:
+        handle = passkey_user_handle(connection, user)
+        existing = connection.execute(
+            "SELECT credential_id FROM webauthn_credentials WHERE user_id=?", (user["id"],)
+        ).fetchall()
+    if len(existing) >= PASSKEY_LIMIT_PER_USER:
+        raise HTTPException(409, f"Hoechstens {PASSKEY_LIMIT_PER_USER} Passkeys je Benutzer")
+    flow_id, challenge = open_passkey_flow("register", int(user["id"]))
+    return JSONResponse({
+        "flow": flow_id,
+        "publicKey": {
+            "challenge": passkeys.b64url_encode(challenge),
+            "rp": {"id": rp_id, "name": "RAVEN"},
+            "user": {"id": handle, "name": user["username"], "displayName": user["display_name"] or user["username"]},
+            "pubKeyCredParams": [{"type": "public-key", "alg": alg} for alg in passkeys.SUPPORTED_ALGORITHMS],
+            "timeout": PASSKEY_FLOW_SECONDS * 1000,
+            "attestation": "none",
+            "authenticatorSelection": {"residentKey": "required", "userVerification": "required"},
+            "excludeCredentials": [{"type": "public-key", "id": row["credential_id"]} for row in existing],
+        },
+    })
+
+
+@app.post("/account/passkeys")
+async def passkey_register(request: Request):
+    user = require_user(request)
+    verify_csrf_header(request, user)
+    data = await json_body(request)
+    challenge = take_passkey_flow(str(data.get("flow", "")), "register", int(user["id"]))
+    rp_id, origin = passkey_relying_party()
+    name = str(data.get("name", "")).strip()[:80] or "Passkey"
+    transports = data.get("transports") if isinstance(data.get("transports"), list) else []
+    try:
+        credential = passkeys.verify_registration(
+            client_data_json=passkeys.b64url_decode(str(data.get("clientDataJSON", ""))),
+            attestation_object=passkeys.b64url_decode(str(data.get("attestationObject", ""))),
+            challenge=challenge, origin=origin, rp_id=rp_id,
+        )
+    except passkeys.WebAuthnError as exc:
+        audit(request, "passkey.register_failed", user["username"], str(exc), user_id=user["id"])
+        return JSONResponse({"error": f"Passkey konnte nicht registriert werden: {exc}"}, status_code=400)
+    if credential["credential_id"] != str(data.get("id", "")):
+        return JSONResponse({"error": "Credential-ID passt nicht zur Antwort"}, status_code=400)
+    try:
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO webauthn_credentials(user_id,credential_id,public_key,algorithm,sign_count,name,"
+                "aaguid,transports,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (user["id"], credential["credential_id"], credential["public_key"], credential["algorithm"],
+                 credential["sign_count"], name, credential["aaguid"],
+                 ",".join(str(item)[:20] for item in transports[:8]), now_iso()),
+            )
+    except sqlite3.IntegrityError:
+        return JSONResponse({"error": "Dieser Passkey ist bereits registriert"}, status_code=409)
+    audit(request, "passkey.register", user["username"], f"name={name}", user_id=user["id"])
+    return JSONResponse({"redirect": f"/account?message={quote('Passkey wurde hinzugefügt')}"})
+
+
+@app.post("/account/passkeys/{credential_id}/delete")
+def passkey_delete(request: Request, credential_id: int, csrf_token: str = Form(...)):
+    user = require_user(request)
+    verify_csrf(user, csrf_token)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT name FROM webauthn_credentials WHERE id=? AND user_id=?", (credential_id, user["id"])
+        ).fetchone()
+        if not row:
+            raise HTTPException(404)
+        connection.execute("DELETE FROM webauthn_credentials WHERE id=?", (credential_id,))
+    audit(request, "passkey.delete", user["username"], f"name={row['name']}", user_id=user["id"])
+    return RedirectResponse(f"/account?message={quote('Passkey wurde entfernt')}", status_code=303)
 
 
 @app.post("/logout")
@@ -2847,8 +3101,12 @@ def backup_event_entry(row: sqlite3.Row) -> dict[str, Any]:
         duration = payload.get("duration_seconds")
         if isinstance(duration, (int, float)):
             facts.append(f"{duration:.0f} s")
-        databases = (payload.get("mariadb") or {}).get("database_count")
-        if isinstance(databases, int) and databases:
+        databases = sum(
+            count for count in (
+                (payload.get(engine) or {}).get("database_count") for engine in ("mariadb", "postgresql")
+            ) if isinstance(count, int)
+        )
+        if databases:
             facts.append(f"{databases} Datenbanken")
     elif row["event"] == "failure":
         error = str(payload.get("error") or payload.get("error_type") or "").strip()
@@ -4171,6 +4429,8 @@ def policy_create(
     start_offset_minutes: int = Form(0),
     mariadb_databases_enabled: str | None = Form(None),
     mariadb_users_enabled: str | None = Form(None),
+    postgresql_databases_enabled: str | None = Form(None),
+    postgresql_roles_enabled: str | None = Form(None),
     mail_on_success: str | None = Form(None),
     mail_on_failure: str | None = Form(None),
     mail_on_skipped: str | None = Form(None),
@@ -4196,12 +4456,14 @@ def policy_create(
             users_enabled = bool(mariadb_users_enabled)
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
-                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
+                "mariadb_users_enabled,postgresql_databases_enabled,postgresql_roles_enabled,"
+                "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
                 "mail_on_success,mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,"
                 "minimum_snapshots_to_keep,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
-                 databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
+                 databases_enabled, users_enabled, bool(postgresql_databases_enabled),
+                 bool(postgresql_roles_enabled), schedule_hour, schedule_minute, interval_hours,
                  start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
                  bool(mail_on_skipped), cleanup_enabled_value, retention_days,
                  minimum_snapshots_to_keep, now_iso(), now_iso()),
@@ -4263,6 +4525,8 @@ def policy_update(
     start_offset_minutes: int = Form(0),
     mariadb_databases_enabled: str | None = Form(None),
     mariadb_users_enabled: str | None = Form(None),
+    postgresql_databases_enabled: str | None = Form(None),
+    postgresql_roles_enabled: str | None = Form(None),
     mail_on_success: str | None = Form(None),
     mail_on_failure: str | None = Form(None),
     mail_on_skipped: str | None = Form(None),
@@ -4290,12 +4554,14 @@ def policy_update(
             users_enabled = bool(mariadb_users_enabled)
             connection.execute(
                 "UPDATE backup_policies SET name=?,description=?,mariadb_enabled=?,"
-                "mariadb_databases_enabled=?,mariadb_users_enabled=?,schedule_hour=?,schedule_minute=?,"
+                "mariadb_databases_enabled=?,mariadb_users_enabled=?,postgresql_databases_enabled=?,"
+                "postgresql_roles_enabled=?,schedule_hour=?,schedule_minute=?,"
                 "interval_hours=?,start_offset_minutes=?,mail_on_success=?,mail_on_failure=?,"
                 "mail_on_skipped=?,cleanup_enabled=?,retention_days=?,minimum_snapshots_to_keep=?,"
                 "updated_at=? WHERE id=?",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
-                 databases_enabled, users_enabled, schedule_hour, schedule_minute, interval_hours,
+                 databases_enabled, users_enabled, bool(postgresql_databases_enabled),
+                 bool(postgresql_roles_enabled), schedule_hour, schedule_minute, interval_hours,
                  start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
                  bool(mail_on_skipped), cleanup_enabled_value, retention_days,
                  minimum_snapshots_to_keep, now_iso(), policy_id),
@@ -4349,10 +4615,12 @@ def policy_duplicate(
                 raise HTTPException(400, f"Policy-Name muss 3 bis {POLICY_NAME_MAX} Zeichen lang sein")
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
-                "mariadb_users_enabled,schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
+                "mariadb_users_enabled,postgresql_databases_enabled,postgresql_roles_enabled,"
+                "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
                 "mail_on_success,mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,"
                 "minimum_snapshots_to_keep,active,created_at,updated_at) "
                 "SELECT ?,description,mariadb_enabled,mariadb_databases_enabled,mariadb_users_enabled,"
+                "postgresql_databases_enabled,postgresql_roles_enabled,"
                 "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,mail_on_success,"
                 "mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,minimum_snapshots_to_keep,"
                 "active,?,? FROM backup_policies WHERE id=?",
@@ -5056,7 +5324,7 @@ def build_agent_config(client: sqlite3.Row, source_hostname: str, has_mariadb: b
     mail_on_success = bool(policy["mail_on_success"]) and bool(smtp["enabled"])
     mail_on_failure = bool(policy["mail_on_failure"]) and bool(smtp["enabled"])
     mail_on_skipped = bool(policy["mail_on_skipped"]) and bool(smtp["enabled"])
-    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{onboarding['fqdn']}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\nstate_path = "/var/lib/raven-backup/agent-{client['slug']}.json"\n{empty_sources_config}\n{path_config}\n[schedule]\nhour = {int(policy['schedule_hour'])}\nminute = {int(policy['schedule_minute'])}\ninterval_hours = {int(policy['interval_hours'])}\n\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\nmail_on_skipped = {str(mail_on_skipped).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = "{smtp['username']}"\npassword = "{smtp['password']}"\nfrom_address = "{smtp['from_address']}"\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
+    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{onboarding['fqdn']}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\npostgresql_databases_enabled = {str(bool(policy['postgresql_databases_enabled'])).lower()}\npostgresql_roles_enabled = {str(bool(policy['postgresql_roles_enabled'])).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\nstate_path = "/var/lib/raven-backup/agent-{client['slug']}.json"\n{empty_sources_config}\n{path_config}\n[schedule]\nhour = {int(policy['schedule_hour'])}\nminute = {int(policy['schedule_minute'])}\ninterval_hours = {int(policy['interval_hours'])}\n\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\nmail_on_skipped = {str(mail_on_skipped).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = "{smtp['username']}"\npassword = "{smtp['password']}"\nfrom_address = "{smtp['from_address']}"\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
 
 
 @app.post("/api/onboard/register")

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Konto · RAVEN{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">Eigenes Konto</p><h1>Anmeldung &amp; Passkeys</h1><p class="muted">Angemeldet als <code>{{ user.username }}</code>. Ein Passkey ersetzt das Passwort beim Login: Er liegt auf deinem Gerät oder im Passwortmanager und wird per Fingerabdruck, Gesicht oder Geräte-PIN freigegeben.</p></div></div>
+{% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Neues Gerät</p><h2>Passkey hinzufügen</h2></div><span class="muted">Gilt nur für <code>{{ request.url.hostname }}</code></span></div>
+  <div class="alert error" id="passkey-error" hidden></div>
+  <div class="alert warning" id="passkey-unsupported" hidden>Dieser Browser unterstützt keine Passkeys oder die Seite ist nicht sicher geladen.</div>
+  <div class="policy-assign">
+    <label>Bezeichnung<small>Hilft dir später beim Entfernen, z. B. „Laptop“ oder „iPhone“.</small><input id="passkey-name" maxlength="80" placeholder="Passkey"></label>
+    <button type="button" class="primary" id="passkey-register" data-csrf="{{ csrf }}">Passkey registrieren</button>
+  </div>
+</section>
+<section class="panel"><div class="panel-head"><h2>Registrierte Passkeys</h2><span class="muted">{{ credentials|length }} von höchstens 20</span></div><div class="table-wrap"><table><thead><tr><th>Bezeichnung</th><th>Hinzugefügt</th><th>Zuletzt benutzt</th><th></th></tr></thead><tbody>{% for item in credentials %}<tr><td><strong>{{ item.name }}</strong></td><td>{{ item.created_at }}</td><td>{{ item.last_used_at or 'noch nie' }}</td><td><form method="post" action="/account/passkeys/{{ item.id }}/delete" data-confirm="Passkey „{{ item.name }}“ entfernen? Danach ist mit diesem Gerät keine Passkey-Anmeldung mehr möglich."><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary">Entfernen</button></form></td></tr>{% else %}<tr><td colspan="4" class="empty">Noch kein Passkey registriert. Die Anmeldung mit Benutzername und Passwort funktioniert weiterhin.</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

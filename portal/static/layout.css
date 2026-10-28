@@ -106,3 +106,8 @@ body.layout-wide .shell { max-width: 1800px; }
   .nav-footer { margin-top: 0; }
   .shell { padding: 28px 16px 56px; }
 }
+
+/* Script-controlled elements stay hidden although buttons set their own display. */
+[hidden] { display: none !important; }
+.passkey-login { margin-top: 17px; }
+.passkey-login button { width: 100%; }

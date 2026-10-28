@@ -31,6 +31,10 @@
       <div><p class="eyebrow">MariaDB</p><h2>Datenbanksicherung</h2><p class="muted">Beide Komponenten lassen sich unabhängig voneinander sichern.</p></div>
       <div class="checks"><label><input type="checkbox" name="mariadb_databases_enabled" {% if policy.mariadb_databases_enabled %}checked{% endif %}> Datenbanken sichern <small>Schemas, Trigger, Routinen, Events und Nutzdaten aller Anwendungsdatenbanken</small></label><label><input type="checkbox" name="mariadb_users_enabled" {% if policy.mariadb_users_enabled %}checked{% endif %}> Datenbankbenutzer und Rechte sichern <small>CREATE USER- und GRANT-Anweisungen, unabhängig von den Datenbanken</small></label></div>
     </div>
+    <div class="form-block">
+      <div><p class="eyebrow">PostgreSQL</p><h2>PostgreSQL-Sicherung</h2><p class="muted">Der Agent findet lokale Cluster und PostgreSQL-Container unter Docker selbst; Server ohne PostgreSQL bleiben unberührt.</p></div>
+      <div class="checks"><label><input type="checkbox" name="postgresql_databases_enabled" {% if policy.postgresql_databases_enabled %}checked{% endif %}> Datenbanken sichern <small>Konsistenter <code>pg_dump</code> jeder Datenbank als SQL, je Instanz getrennt</small></label><label><input type="checkbox" name="postgresql_roles_enabled" {% if policy.postgresql_roles_enabled %}checked{% endif %}> Rollen und Rechte sichern <small>Rollen, Mitgliedschaften und Tablespaces per <code>pg_dumpall --globals-only</code></small></label></div>
+    </div>
     <div class="actions"><button class="primary">Policy speichern</button></div>
   </form>
 </section>
@@ -40,7 +44,7 @@
 <section class="panel"><div class="panel-head"><h2>Zugewiesene Server</h2><span class="muted">{{ clients|length }}</span></div><div class="server-chips">{% for client in clients %}<a href="/clients/{{ client.id }}">{{ client.slug }}</a>{% else %}<span class="muted">Diese Policy ist noch keinem Server zugewiesen.</span>{% endfor %}</div></section>
 {% if user.role == 'admin' %}
 <section class="panel">
-  <div class="panel-head"><div><p class="eyebrow">Als Vorlage verwenden</p><h2>Policy duplizieren</h2></div><span class="muted">Zeitplan, Mailereignisse, MariaDB-Optionen und alle Pfadregeln</span></div>
+  <div class="panel-head"><div><p class="eyebrow">Als Vorlage verwenden</p><h2>Policy duplizieren</h2></div><span class="muted">Zeitplan, Mailereignisse, Datenbankoptionen und alle Pfadregeln</span></div>
   <form method="post" action="/policies/{{ policy.id }}/duplicate" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <p class="muted">Die Kopie übernimmt sämtliche Einstellungen dieser Policy, bleibt aber zunächst keinem Server zugewiesen. Zuweisen lässt sie sich danach im jeweiligen Serverdetail.</p>

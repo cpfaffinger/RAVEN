@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="/static/certificates.css">
   <script defer src="/static/onboarding.js"></script>
   <script defer src="/static/live-output.js"></script>
+  <script defer src="/static/passkeys.js"></script>
 </head>
 <body class="{% block body_class %}{% endblock %}{% if user %} has-sidebar{% endif %}">
 {% if user %}
@@ -52,6 +53,7 @@
     {% endif %}
     <div class="nav-group nav-footer">
       {{ nav_item('manual', '/manual', 'Handbuch') }}
+      {{ nav_item('account', '/account', 'Konto & Passkeys') }}
       <div class="nav-user"><strong>{{ user.display_name or user.username }}</strong><span>{{ 'Administrator' if user.role == 'admin' else 'Leserecht' }}</span></div>
       <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link-button">Abmelden</button></form>
     </div>
