@@ -155,6 +155,8 @@ Danach im Browser `https://<Portal-Hostname>:<HTTPS-Port>` öffnen und mit dem w
 
 Ein bereits onboardeter Server kann aus den Clientdetails jederzeit **erneut deployt** werden. Das Re-Deployment installiert Agent, Konfiguration, SSH- und Cron-Block frisch und vergibt ein neues Agent-Token. Standardmäßig ist dabei **Neuen SSH-Schlüssel erzeugen** aktiv: Der Bootstrap legt den bisherigen `raven_backup_*`-Schlüssel beiseite, erzeugt einen frischen Ed25519-Schlüssel, und das Portal ersetzt den Eintrag in `authorized_keys`, sodass der alte Schlüssel sofort seinen Zugang verliert; nach erfolgreicher Registrierung wird er auf der Quelle gelöscht. Scheitert die Registrierung, bleibt der alte Schlüssel als `raven_backup_<slug>.replaced-<Zeitstempel>` für ein Zurückrollen erhalten. Ohne diese Option ist das Re-Deployment idempotent: vorhandene RAVEN-Schlüssel werden wiederverwendet. Historische `pulseone_backup_*`-Identitäten werden ohne Schlüsselrotation in den aktuellen `raven_backup_*`-Pfad übernommen, und der öffentliche Schlüssel wird stets neu aus dem privaten Schlüssel abgeleitet.
 
+Wird ein Quellserver **umbenannt**, ist kein neues Onboarding nötig. Der Agent ist an den Hostnamen gebunden, für den er ausgeliefert wurde, und das Portal weist Abfragen unter einem anderen Namen ab. Meldet sich der Agent unter einem neuen Namen, zeigt die Clientdetailseite das an und übernimmt ihn per Knopf; alternativ lässt sich der Name unter **Konfiguration → Quellhostname** direkt setzen (er muss `hostname -f` auf der Quelle entsprechen). Das Portal erhöht dabei die Konfigurationsversion, der Agent erhält beim nächsten Poll die angepasste Konfiguration, und Token, SSH-Schlüssel, Zielkonto und bisherige Backups bleiben unverändert.
+
 ### Nicht-interaktive Installation
 
 Für automatisierte Installationen steht `sudo -E bash install.sh --non-interactive` zur Verfügung. Die erforderlichen und optionalen Umgebungsvariablen zeigt `bash install.sh --help` an. Geheimnisse sollten dabei aus einer geschützten Deployment-Umgebung kommen und nicht in Shell-History oder Repository abgelegt werden.
@@ -249,6 +251,8 @@ Jedes Ziel hat sein eigenes **Intervall**, seine eigenen **rsync-Optionen** und 
 | Aufbewahrung | Tage, nach denen Laufordner auf dem Spiegel entfernt werden; `0` entfernt nichts |
 
 Die rsync-Optionen sind operatorseitig, laufen aber gegen eine Freigabeliste: erlaubt sind Optionen, die beschreiben *was* übertragen wird, niemals solche, die bestimmen *wie* die Gegenseite erreicht wird. `-e`, `--rsh`, `--rsync-path`, `--files-from` und Verwandte werden abgelehnt, weil sie fremde Programme starten könnten; Quelle, Ziel und SSH-Transport setzt RAVEN selbst.
+
+Ein Lauf darf bis zu 24 Stunden dauern, weil ein Spiegel nach langem Intervall alle seither entstandenen Laufordner nachholen muss. Meldet das Ziel weniger als 1 GiB freien Speicher, startet die Replikation gar nicht erst und der Lauf nennt den vollen Zielspeicher als Ursache.
 
 Die Aufbewahrung greift ausschließlich auf Verzeichnisse, die exakt wie ein Backup-Lauf eines Zielkontos aussehen (`<ziel>/backup_*/<lauf-id>`). Alles andere auf dem Spiegel bleibt unberührt, auch `current`-Spiegel und fremde Verzeichnisse.
 

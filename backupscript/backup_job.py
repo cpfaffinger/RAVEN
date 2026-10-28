@@ -689,8 +689,26 @@ def retry(operation_name: str, attempts: int, function: Any) -> Any:
     raise RuntimeError(f"{operation_name} nach {attempts} Versuchen fehlgeschlagen: {last_error}")
 
 
+def producer_shell(producer: list[str], tolerated_exit_codes: frozenset[int]) -> str:
+    """Return the producer as shell code that reports tolerated exit codes as success.
+
+    The status line goes to stderr, where the caller collects it, so the
+    tolerated code is still visible in the log.
+    """
+    command = shlex.join(producer)
+    if not tolerated_exit_codes:
+        return command
+    accepted = " ".join(str(code) for code in sorted(tolerated_exit_codes))
+    return (
+        f"{{ {command}; rc=$?; for ok in {accepted}; do "
+        f"if [ \"$rc\" -eq \"$ok\" ]; then echo \"raven: producer exit $rc toleriert\" >&2; rc=0; fi; "
+        f"done; exit $rc; }}"
+    )
+
+
 def stream_compressed(
-    cfg: dict[str, Any], producer: list[str], remote_file: str, *, attempts: int
+    cfg: dict[str, Any], producer: list[str], remote_file: str, *, attempts: int,
+    tolerated_exit_codes: frozenset[int] = frozenset(),
 ) -> None:
     """Stream one compressed artefact and record the checksum of what landed.
 
@@ -706,7 +724,7 @@ def stream_compressed(
         f"mv -f {shlex.quote(remote_tmp)} {shlex.quote(remote_file)}"
     )
     pipeline = (
-        f"{shlex.join(producer)} | /usr/bin/zstd -q -T0 -{compression_level} | "
+        f"{producer_shell(producer, tolerated_exit_codes)} | /usr/bin/zstd -q -T0 -{compression_level} | "
         f"{shlex.join(ssh_command(cfg, remote_write))}"
     )
 
@@ -714,17 +732,29 @@ def stream_compressed(
         proc = subprocess.run(
             ["/usr/bin/bash", "-o", "pipefail", "-c", pipeline],
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
             check=False,
         )
+        diagnostics = [line for line in (proc.stderr or "").splitlines() if line.strip()]
         if proc.returncode != 0:
             ssh(
                 cfg,
                 f"rm -f -- {shlex.quote(remote_tmp)} {shlex.quote(remote_file)}",
                 timeout=60,
             )
-            raise RuntimeError(f"Streaming-Pipeline endete mit Status {proc.returncode}")
+            detail = "; ".join(diagnostics[-5:])
+            raise RuntimeError(
+                f"Streaming-Pipeline endete mit Status {proc.returncode}" + (f": {detail}" if detail else "")
+            )
+        if diagnostics:
+            shown = diagnostics[:20]
+            LOG.warning(
+                "%s mit %d Hinweisen geschrieben:\n%s%s",
+                remote_file, len(diagnostics), "\n".join(shown),
+                f"\n... {len(diagnostics) - len(shown)} weitere" if len(diagnostics) > len(shown) else "",
+            )
         digest = (proc.stdout or "").split(maxsplit=1)
         if digest and re.fullmatch(r"[0-9a-f]{64}", digest[0]):
             RUN_CONTENT_HASHES[remote_file] = digest[0]
@@ -923,11 +953,16 @@ def backup_filesystems(
             parent = str(Path(source).parent)
             leaf = Path(source).name
             LOG.info("Persistentes Tar.Zstd %s -> %s", source, destination)
+            # GNU tar exits with 1 when a file changed or vanished while it was
+            # read. The archive is complete and readable, and a live system such
+            # as a database directory does that on every run, so retrying cannot
+            # help; only exit 2 and above are real errors.
             stream_compressed(
                 cfg,
                 ["/usr/bin/tar", "--acls", "--xattrs", "--numeric-owner", "-C", parent, "-cf", "-", leaf],
                 destination,
                 attempts=attempts,
+                tolerated_exit_codes=frozenset({1}),
             )
             stored_bytes = remote_file_size(cfg, destination)
         report["sources"][source] = {

@@ -91,7 +91,13 @@ STORAGE_STATE: dict[str, Any] = {
     "running": False, "started_at": None, "finished_at": None,
     "measured": 0, "errors": 0, "message": "Noch keine Messung",
 }
-MIRROR_TIMEOUT_SECONDS = 21600
+# A mirror that was idle for its whole interval has to catch up on every run
+# directory created meanwhile, which for a large store takes many hours on a
+# home-line uplink. The limit only catches a hung transfer.
+MIRROR_TIMEOUT_SECONDS = 86400
+# Below this the target cannot even hold rsync's temporary files, so a run
+# would only end in a broken pipe after a few minutes.
+MIRROR_MIN_FREE_BYTES = 1024**3
 MIRROR_OUTPUT_LIMIT = 250_000
 MIRROR_PUBLISH_SECONDS = 2.0
 AGENT_SCRIPT_LOCK = threading.Lock()
@@ -568,6 +574,8 @@ def init_db() -> None:
             "storage_checked_at": "TEXT",
             "storage_error": "TEXT NOT NULL DEFAULT ''",
             "last_success_at": "TEXT",
+            "reported_hostname": "TEXT",
+            "reported_hostname_at": "TEXT",
         }
         for column, definition in client_column_defaults.items():
             if column not in client_columns:
@@ -1611,7 +1619,7 @@ def enqueue_due_mirrors() -> None:
                     "INSERT INTO mirror_runs(target_id,mode,status,requested_at) VALUES(?,'scheduled','queued',?)",
                     (target["id"], now_iso()),
                 )
-            interval = max(1, min(168, int(target["interval_hours"])))
+            interval = max(1, min(mirror_module.MAX_INTERVAL_HOURS, int(target["interval_hours"])))
             connection.execute(
                 "UPDATE mirror_targets SET next_run_at=? WHERE id=?",
                 ((now + timedelta(hours=interval)).isoformat(), target["id"]),
@@ -1693,7 +1701,18 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
                 )
             sections.append(f"Zielspeicher: {format_size(free)} frei von {format_size(total)}")
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            free = None
             sections.append(f"Zielspeicher konnte nicht gelesen werden: {exc}")
+        if free is not None and free < MIRROR_MIN_FREE_BYTES:
+            summary = (
+                f"Zielspeicher auf {target['host']} ist voll ({format_size(free)} frei); "
+                "Replikation nicht gestartet"
+            )
+            finish_mirror_run(
+                run_id, target_id, "failure", exit_code=None, summary=summary, output="\n\n".join(sections),
+            )
+            LOG.error("Spiegelreplikation %s: %s", target["name"], summary)
+            return
         account_prefix = str(application_settings()["username_prefix"])
         command = mirror_module.rsync_command(
             source_path=str(HOME_ROOT), username=str(target["username"]), host=str(target["host"]),
@@ -4702,6 +4721,43 @@ def client_policy_assign(
     )
 
 
+@app.post("/clients/{client_id}/hostname")
+def client_hostname_update(
+    request: Request, client_id: int, source_hostname: str = Form(...), csrf_token: str = Form(...)
+):
+    """Accept a renamed source server without onboarding it again.
+
+    The agent pins the hostname it was deployed for and the portal refuses polls
+    from any other name. Changing it here bumps the configuration version, so
+    the agent's next poll under the new name passes and receives a config that
+    expects the new name as well; token, SSH key and backups stay as they are.
+    """
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    hostname = source_hostname.strip()
+    if not HOST_RE.fullmatch(hostname):
+        raise HTTPException(400, "Ungueltiger Hostname")
+    with db() as connection:
+        client = connection.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not client:
+            raise HTTPException(404)
+        previous = client["source_hostname"]
+        if previous == hostname:
+            return RedirectResponse(
+                f"/clients/{client_id}?message={quote('Der Hostname ist bereits hinterlegt')}", status_code=303
+            )
+        connection.execute(
+            "UPDATE clients SET source_hostname=?,reported_hostname=NULL,reported_hostname_at=NULL,"
+            "agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE id=?",
+            (hostname, now_iso(), client_id),
+        )
+    audit(request, "client.hostname", str(client["slug"]), f"old={previous} new={hostname}", user_id=user["id"])
+    return RedirectResponse(
+        f"/clients/{client_id}?message={quote('Quellhostname geändert; der Agent übernimmt ihn beim nächsten Poll')}",
+        status_code=303,
+    )
+
+
 @app.post("/clients/{client_id}/delete")
 def client_delete(request: Request, client_id: int, csrf_token: str = Form(...)):
     """Remove a server whose Linux target account no longer exists.
@@ -5082,6 +5138,14 @@ async def agent_poll(request: Request):
         data = {}
     reported_hostname = str(data.get("hostname", "")).strip()
     if reported_hostname and client["source_hostname"] and reported_hostname != client["source_hostname"]:
+        # Remember what the agent reports so an admin can accept a renamed
+        # server in the portal instead of onboarding it again.
+        if HOST_RE.fullmatch(reported_hostname):
+            with db() as connection:
+                connection.execute(
+                    "UPDATE clients SET reported_hostname=?,reported_hostname_at=? WHERE id=?",
+                    (reported_hostname, now_iso(), client["id"]),
+                )
         raise HTTPException(409, "Source hostname mismatch")
     try:
         reported_config_version = int(data.get("config_version", 0))
@@ -5095,7 +5159,8 @@ async def agent_poll(request: Request):
     with db() as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "UPDATE clients SET last_poll_at=?,mariadb_available=?,agent_script_sha256=? WHERE id=?",
+            "UPDATE clients SET last_poll_at=?,mariadb_available=?,agent_script_sha256=?,"
+            "reported_hostname=NULL,reported_hostname_at=NULL WHERE id=?",
             (now_iso(), reported_mariadb, reported_script_sha256, client["id"]),
         )
         connection.execute(

@@ -467,7 +467,11 @@ def evaluate(cfg: dict[str, Any], previous_state: dict[str, Any] | None = None) 
             account = pwd.getpwnam(user)
         except KeyError:
             results.append(
-                Result(user, "ERROR", "account", None, None, "gleichnamiger Systembenutzer fehlt")
+                Result(
+                    user, "ERROR", "account", None, None,
+                    "gleichnamiger Systembenutzer fehlt; bleibt das Verzeichnis als Archiv bewusst "
+                    f"liegen, {user} unter [monitor].ignore eintragen, sonst die Daten entfernen",
+                )
             )
             continue
         if Path(account.pw_dir) != user_path:
