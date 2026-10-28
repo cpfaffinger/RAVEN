@@ -624,16 +624,19 @@ def init_db() -> None:
         if "mariadb_users_enabled" not in policy_columns:
             connection.execute("ALTER TABLE backup_policies ADD COLUMN mariadb_users_enabled INTEGER NOT NULL DEFAULT 1")
             connection.execute("UPDATE backup_policies SET mariadb_users_enabled=mariadb_enabled")
-        # Existing policies take PostgreSQL along right away: the agent only
-        # dumps instances it actually finds, so hosts without one are unaffected.
+        # Existing policies follow their MariaDB choice: one that backs up
+        # databases takes PostgreSQL along, one that deliberately skips them
+        # keeps doing so. The agent only dumps instances it actually finds.
         if "postgresql_databases_enabled" not in policy_columns:
             connection.execute(
                 "ALTER TABLE backup_policies ADD COLUMN postgresql_databases_enabled INTEGER NOT NULL DEFAULT 1"
             )
+            connection.execute("UPDATE backup_policies SET postgresql_databases_enabled=mariadb_databases_enabled")
         if "postgresql_roles_enabled" not in policy_columns:
             connection.execute(
                 "ALTER TABLE backup_policies ADD COLUMN postgresql_roles_enabled INTEGER NOT NULL DEFAULT 1"
             )
+            connection.execute("UPDATE backup_policies SET postgresql_roles_enabled=mariadb_users_enabled")
         migrate_policy_schedule(connection, policy_columns, client_columns, portal_defaults)
         migrate_policy_notifications(connection, policy_columns, client_columns)
         cleanup_defaults = checker_cleanup_configuration()
