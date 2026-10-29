@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -142,6 +143,89 @@ class RetentionTests(unittest.TestCase):
             mirror.retention_command("/srv/raven", 0)
         with self.assertRaises(ValueError):
             mirror.retention_command("/srv/../etc; rm -rf /", 8)
+
+
+class LatestStrategyTests(unittest.TestCase):
+    def test_picks_the_newest_complete_run_of_every_account(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            for account, runs in {
+                "backup_web": ["20261027020101631", "20261028020101906", "20261029020104721"],
+                "backup_db": ["20261028020101906"],
+                "backup_new": [],
+            }.items():
+                (home / account).mkdir()
+                for run in runs:
+                    (home / account / run).mkdir()
+                    (home / account / run / ".backup-ok").write_text("{}")
+            # The newest run of backup_web is still being written.
+            (home / "backup_web" / "20261029020104721" / ".backup-ok").unlink()
+            (home / "backup_web" / "current_copy").mkdir()
+            (home / "backup_db" / "20261029020101480").mkdir()
+            (home / "static2").mkdir()
+            (home / "backup_file").write_text("")
+            self.assertEqual(mirror.latest_runs(home, "backup_"), {
+                "backup_db": "20261028020101906",
+                "backup_new": None,
+                "backup_web": "20261028020101906",
+            })
+
+    def test_filters_keep_one_run_and_leave_incomplete_accounts_alone(self):
+        rules = mirror.latest_filters({"backup_web": "20261028020101906", "backup_new": None})
+        self.assertEqual(rules, [
+            "--filter=- /backup_new/",
+            "--filter=+ /backup_web/",
+            "--filter=+ /backup_web/20261028020101906/",
+            "--filter=+ /backup_web/current/",
+            "--filter=H /backup_web/*",
+            "--filter=R /backup_web/*",
+        ])
+
+    def test_filters_refuse_names_that_could_escape(self):
+        for selection in ({"backup_web/..": "20261028020101906"}, {"backup_web": "../etc"},
+                          {"backup web": "20261028020101906"}):
+            with self.assertRaises(ValueError):
+                mirror.latest_filters(selection)
+            with self.assertRaises(ValueError):
+                mirror.seed_command("/srv/raven", selection)
+
+    def test_deletion_waits_for_the_complete_transfer(self):
+        options = mirror.latest_options(["-a", "--delete", "--inplace", "--stats", "--bwlimit=5000"])
+        self.assertEqual(options, ["-a", "--stats", "--bwlimit=5000", "--delete-after", "--delay-updates"])
+
+    def test_selection_rules_come_before_the_operator_rules(self):
+        command = mirror.rsync_command(
+            source_path="/home", username="raven", host="mirror.example.com", remote_path="/srv/raven",
+            options=["-a", "--delete", "--filter=P backup_*/[0-9]*"], key_path="/run/key",
+            known_hosts_path="/run/known", port=22, account_prefix="backup_",
+            selection={"backup_web": "20261028020101906"},
+        )
+        self.assertEqual(command[1], "--filter=+ /backup_web/")
+        self.assertLess(command.index("--filter=R /backup_web/*"), command.index("--filter=P backup_*/[0-9]*"))
+        self.assertLess(command.index("--filter=P backup_*/[0-9]*"), command.index("--filter=+ /backup_*/"))
+        self.assertIn("--delete-after", command)
+        self.assertNotIn("--delete", command)
+
+    def test_full_strategy_keeps_the_operator_options(self):
+        command = mirror.rsync_command(
+            source_path="/home", username="raven", host="mirror.example.com", remote_path="/srv/raven",
+            options=["-a", "--delete"], key_path="/run/key", known_hosts_path="/run/known", port=22,
+            account_prefix="backup_",
+        )
+        self.assertEqual(command[1:3], ["-a", "--delete"])
+        self.assertNotIn("--delay-updates", command)
+
+    def test_seed_links_the_previous_run_without_its_marker(self):
+        command = mirror.seed_command("/srv/raven/", {"backup_web": "20261028020101906", "backup_new": None})
+        self.assertTrue(command.startswith("cd /srv/raven || exit 0\n"))
+        self.assertIn('cp -al -- "$1/$previous" "$seed"', command)
+        self.assertIn('rm -f -- "$seed/.backup-ok"', command)
+        self.assertTrue(command.endswith("seed backup_web 20261028020101906"))
+        self.assertNotIn("backup_new", command)
+
+    def test_literal_data_counts_as_transferred(self):
+        output = "Total transferred file size: 9,000,000 bytes\nLiteral data: 1,024 bytes\n"
+        self.assertEqual(mirror.parse_transferred_bytes(output), 1024)
 
 
 class IntervalTests(unittest.TestCase):

@@ -16,7 +16,7 @@ RAVEN verbindet ein TLS-geschütztes Verwaltungsportal mit einem schlanken Pytho
 - Backup Explorer für Verzeichnisse, Zstandard-Archive und einzelne Downloads
 - lokale Benutzer und Rollen, Anmeldung per Passwort oder Passkey, kurzlebige Deployment-Tokens sowie isolierte SSH-Zielkonten
 - integriertes SQLite, Plain-SMTP-Benachrichtigungen und Let's Encrypt per Cloudflare- oder manueller DNS-01-Challenge
-- Replikation des gesamten Bestands auf beliebig viele Spiegelserver mit eigenem Intervall und eigener Aufbewahrung
+- Replikation auf beliebig viele Spiegelserver mit eigenem Intervall: nur der neueste Stand je Host oder der gesamte Bestand mit eigener Aufbewahrung
 - Aktivitätsfeed auf der Übersicht über eingegangene Backups, Checkerläufe und Verwaltungsaktionen
 - Liveness- und Readiness-Endpunkte für externes Monitoring
 
@@ -236,7 +236,18 @@ Die Übersicht zeigt den freien, belegten und gesamten Speicher des Dateisystems
 
 ## Spiegelserver
 
-Der Zielserver hält die Sicherungen so lange vor, wie es seine Rotation zulässt. Für eine längere Historie und eine zweite Kopie repliziert RAVEN den gesamten Bestand aus `/home` per rsync auf beliebig viele entfernte Spiegel. Verwaltet werden sie admin-only unter **Spiegelserver**.
+Der Zielserver hält die Sicherungen so lange vor, wie es seine Rotation zulässt. Für eine zweite Kopie oder eine längere Historie repliziert RAVEN den Bestand aus `/home` per rsync auf beliebig viele entfernte Spiegel. Verwaltet werden sie admin-only unter **Spiegelserver**.
+
+Je Ziel wird eine **Strategie** gewählt:
+
+| Strategie | Was auf dem Spiegel liegt |
+| --- | --- |
+| Nur den neuesten Stand je Host (Standard für neue Ziele) | Der letzte vollständige Lauf jedes Hosts, also der neueste Ordner mit `.backup-ok`, dazu `current/`. Ältere Stände verschwinden vom Spiegel. |
+| Gesamten Bestand mit allen Ständen | Alle Laufordner, wie sie auf dem Zielserver liegen, begrenzt durch rsync-Optionen und Aufbewahrung (siehe Betriebsmuster unten) |
+
+Beim **neuesten Stand** sucht RAVEN zu Beginn jedes Laufs je Zielkonto den neuesten vollständigen Lauf. Ein Lauf, der gerade noch geschrieben wird, zählt nicht. Fehlt ein Lauf auf dem Spiegel noch, legt RAVEN dort zuerst eine Hardlink-Kopie des vorherigen Stands unter dem neuen Namen an, ohne dessen Erfolgsmarker. Gegen diese Basis überträgt rsync nur, was sich geändert hat. Unveränderte Dumps und Archive gehen also nicht noch einmal über die Leitung, und die Kopie belegt keinen zusätzlichen Platz. Das Löschen des alten Stands und das Einsetzen der neuen Dateien geschieht erst am Ende des Transfers (`--delete-after --delay-updates`). Bricht ein Lauf ab, bleibt der vorherige Stand vollständig erhalten. Hat ein Konto noch gar keinen vollständigen Lauf, bleibt sein Ordner auf dem Spiegel unverändert.
+
+Bei dieser Strategie setzt RAVEN den Zeitpunkt der Löschung selbst. Aus den rsync-Optionen entfallen dafür `--delete*` und `--inplace`. Schutzregeln für Laufordner und die Aufbewahrung wirken hier nicht.
 
 Repliziert werden ausschließlich die Zielkonten des Backupsystems, also die Ordner unterhalb des Home-Roots, die mit dem konfigurierten Benutzerpräfix beginnen. Alles andere im Home-Root – Freigaben, Handablagen, fremde Benutzerordner – bleibt außen vor. Hat ein früherer Lauf solche Ordner bereits kopiert, bleiben sie auf dem Spiegel unverändert liegen und werden im Laufprotokoll benannt; RAVEN löscht auf einem fremden Server nichts von sich aus.
 
@@ -250,7 +261,7 @@ Jedes Ziel hat sein eigenes **Intervall**, seine eigenen **rsync-Optionen** und 
 | --- | --- |
 | Intervall | Stunden zwischen zwei Replikationsläufen dieses Ziels |
 | rsync-Optionen | Übertragungsverhalten, z. B. `-a --delete --stats` oder `-avz --bwlimit=50M` |
-| Aufbewahrung | Tage, nach denen Laufordner auf dem Spiegel entfernt werden; `0` entfernt nichts |
+| Aufbewahrung | Nur beim gesamten Bestand: Tage, nach denen Laufordner auf dem Spiegel entfernt werden; `0` entfernt nichts |
 
 Die rsync-Optionen sind operatorseitig, laufen aber gegen eine Freigabeliste: erlaubt sind Optionen, die beschreiben *was* übertragen wird, niemals solche, die bestimmen *wie* die Gegenseite erreicht wird. `-e`, `--rsh`, `--rsync-path`, `--files-from` und Verwandte werden abgelehnt, weil sie fremde Programme starten könnten; Quelle, Ziel und SSH-Transport setzt RAVEN selbst.
 
@@ -258,7 +269,7 @@ Ein Lauf darf bis zu 24 Stunden dauern, weil ein Spiegel nach langem Intervall a
 
 Die Aufbewahrung greift ausschließlich auf Verzeichnisse, die exakt wie ein Backup-Lauf eines Zielkontos aussehen (`<ziel>/backup_*/<lauf-id>`). Alles andere auf dem Spiegel bleibt unberührt, auch `current`-Spiegel und fremde Verzeichnisse.
 
-### Drei Betriebsmuster
+### Drei Betriebsmuster für den gesamten Bestand
 
 Wie weit die Historie eines Spiegels reicht, ergibt sich aus dem Zusammenspiel von rsync-Optionen und Intervall. Der Zielserver selbst rotiert vollständige datierte Stände nach der Retention der jeweils zugewiesenen Policy.
 

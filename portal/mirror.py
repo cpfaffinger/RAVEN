@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Replication of the whole backup store to remote mirror servers.
+"""Replication of the backup store to remote mirror servers.
+
+A mirror either holds only the newest complete run of every host or the whole
+store with every run directory.
 
 The portal keeps the credentials and the schedule; this module owns everything
 that turns those settings into commands. It is deliberately free of database
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from pathlib import Path
 from typing import Any
 
 
@@ -62,6 +66,28 @@ FORBIDDEN_FLAGS = {
     "--daemon", "--config", "--log-file", "--log-file-format", "--out-format",
     "--password-file", "--copy-dest", "--link-dest", "--compare-dest", "--temp-dir",
 }
+
+# "latest" keeps only the newest complete run of every host on the mirror,
+# "full" replicates the whole store with every run directory.
+STRATEGIES = {
+    "latest": "Nur den neuesten Stand je Host",
+    "full": "Gesamten Bestand mit allen Ständen",
+}
+DEFAULT_STRATEGY = "latest"
+
+# The latest strategy sets the timing of deletions itself: the previous run on
+# the mirror has to survive until the new one is complete. --inplace would
+# also write into the hard links that seed the new run from the old one.
+LATEST_DROPPED_FLAGS = {
+    "--delete", "--delete-before", "--delete-during", "--delete-delay", "--delete-after", "--inplace",
+}
+LATEST_RSYNC_FLAGS = ["--delete-after", "--delay-updates"]
+RUN_NAME_PATTERN = re.compile(r"^[0-9]{8,20}$")
+ACCOUNT_NAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_.-]{0,63}$")
+# Sync-mode sources live outside the run directories and always hold the
+# newest state, so they belong to the latest stand of a host.
+SYNC_DIRECTORY = "current"
+SEED_PREFIX = ".raven-seed-"
 
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}[A-Za-z0-9]$")
 USERNAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -159,6 +185,94 @@ def scope_filters(account_prefix: str) -> list[str]:
     return [f"--filter=+ /{account_prefix}*/", "--filter=- /*"]
 
 
+def latest_runs(home_root: Path, account_prefix: str, marker: str = ".backup-ok") -> dict[str, str | None]:
+    """Return the newest complete run directory of every backup account.
+
+    Run names are timestamps, so the newest one sorts last. A run counts only
+    once the agent wrote its marker; an account without any complete run maps
+    to None, so the mirror keeps whatever it already holds for it.
+    """
+    if not ACCOUNT_PREFIX_PATTERN.fullmatch(account_prefix):
+        raise ValueError("Benutzerpraefix ist fuer die Auswahl der Ordner ungueltig")
+    selection: dict[str, str | None] = {}
+    for account in sorted(home_root.iterdir()):
+        if not account.name.startswith(account_prefix) or not account.is_dir():
+            continue
+        if not ACCOUNT_NAME_PATTERN.fullmatch(account.name):
+            continue
+        complete = [
+            run.name for run in account.iterdir()
+            if RUN_NAME_PATTERN.fullmatch(run.name) and run.is_dir() and (run / marker).is_file()
+        ]
+        selection[account.name] = max(complete) if complete else None
+    return selection
+
+
+def latest_filters(selection: dict[str, str | None]) -> list[str]:
+    """Restrict the transfer to the newest run of every account.
+
+    Older runs are hidden from the sender only; the explicit risk rule makes
+    sure no protect rule of the operator keeps them, so --delete removes them
+    from the mirror. An account without a complete run is excluded on both
+    sides and stays on the mirror as it is.
+    """
+    rules: list[str] = []
+    for account, run in sorted(selection.items()):
+        if not ACCOUNT_NAME_PATTERN.fullmatch(account):
+            raise ValueError(f"Kontoname {account} ist ungueltig")
+        if run is None:
+            rules.append(f"--filter=- /{account}/")
+            continue
+        if not RUN_NAME_PATTERN.fullmatch(run):
+            raise ValueError(f"Laufname {run} ist ungueltig")
+        rules.extend([
+            f"--filter=+ /{account}/",
+            f"--filter=+ /{account}/{run}/",
+            f"--filter=+ /{account}/{SYNC_DIRECTORY}/",
+            f"--filter=H /{account}/*",
+            f"--filter=R /{account}/*",
+        ])
+    return rules
+
+
+def latest_options(options: list[str]) -> list[str]:
+    """Replace the operator's deletion timing with the one the latest strategy needs."""
+    return [option for option in options if option not in LATEST_DROPPED_FLAGS] + LATEST_RSYNC_FLAGS
+
+
+def seed_command(remote_path: str, selection: dict[str, str | None]) -> str:
+    """Return a remote command that prepares every new run from the previous one.
+
+    The newest run already on the mirror is hard linked under the name of the
+    new run, so rsync only transfers files that changed and the copy costs no
+    space. Its marker is removed, so an interrupted transfer never leaves a run
+    that looks complete.
+    """
+    if not ABSOLUTE_PATH_PATTERN.fullmatch(remote_path):
+        raise ValueError("Zielpfad ist nicht sicher genug")
+    lines = [
+        f"cd {shlex.quote(remote_path.rstrip('/'))} || exit 0",
+        "seed() {",
+        '  [ -d "$1" ] || return 0',
+        '  [ -e "$1/$2" ] && return 0',
+        "  previous=$(find \"$1\" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended "
+        "-regex '.*/[0-9]{8,20}' -printf '%f\\n' | sort | tail -n 1)",
+        '  [ -n "$previous" ] || return 0',
+        f'  seed="$1/{SEED_PREFIX}$2"',
+        '  rm -rf -- "$seed"',
+        '  cp -al -- "$1/$previous" "$seed" && rm -f -- "$seed/.backup-ok" && mv -- "$seed" "$1/$2" '
+        '&& echo "$1: $previous -> $2"',
+        "}",
+    ]
+    for account, run in sorted(selection.items()):
+        if run is None:
+            continue
+        if not ACCOUNT_NAME_PATTERN.fullmatch(account) or not RUN_NAME_PATTERN.fullmatch(run):
+            raise ValueError(f"{account}/{run} ist kein gueltiger Laufordner")
+        lines.append(f"seed {shlex.quote(account)} {shlex.quote(run)}")
+    return "\n".join(lines)
+
+
 def remote_destination(username: str, host: str, remote_path: str) -> str:
     return f"{username}@{host}:{remote_path.rstrip('/')}/"
 
@@ -174,14 +288,22 @@ def rsync_command(
     known_hosts_path: str,
     port: int,
     account_prefix: str,
+    selection: dict[str, str | None] | None = None,
 ) -> list[str]:
     """Build the replication command for one mirror target.
 
     The scope rules come after the operator's options so their own rules keep
-    precedence for anything inside an account.
+    precedence for anything inside an account. A selection of latest runs comes
+    first instead: its rules only decide the two top levels, so the operator's
+    rules still apply to everything inside a run.
     """
+    selected = []
+    if selection is not None:
+        options = latest_options(options)
+        selected = latest_filters(selection)
     return [
         "/usr/bin/rsync",
+        *selected,
         *options,
         *scope_filters(account_prefix),
         "-e", shlex.join(ssh_transport(key_path, known_hosts_path, port)),
@@ -211,8 +333,14 @@ def parse_disk_usage(output: str) -> tuple[int, int]:
 
 
 def parse_transferred_bytes(output: str) -> int | None:
-    """Return the transferred byte count rsync reports with --stats."""
-    match = re.search(r"Total transferred file size:\s*([\d.,]+)\s*bytes", output)
+    """Return the transferred byte count rsync reports with --stats.
+
+    Literal data is what actually crossed the line. The transferred file size
+    also counts files rsync only patched against an existing copy.
+    """
+    match = re.search(r"Literal data:\s*([\d.,]+)\s*bytes", output)
+    if not match:
+        match = re.search(r"Total transferred file size:\s*([\d.,]+)\s*bytes", output)
     if not match:
         match = re.search(r"sent\s+([\d.,]+)\s+bytes", output)
     if not match:
@@ -256,7 +384,7 @@ def retention_command(remote_path: str, retention_days: int) -> str:
 
 def validated_target(
     *, host: str, username: str, remote_path: str, ssh_port: Any, interval_hours: Any,
-    retention_days: Any, rsync_options: str,
+    retention_days: Any, rsync_options: str, strategy: str = DEFAULT_STRATEGY,
 ) -> dict[str, Any]:
     """Validate every operator supplied field of a mirror target."""
     host = host.strip().lower()
@@ -279,7 +407,10 @@ def validated_target(
     retention = int(retention_days)
     if not 0 <= retention <= 3650:
         raise ValueError("Aufbewahrung muss zwischen 0 und 3650 Tagen liegen")
+    if strategy not in STRATEGIES:
+        raise ValueError("Replikationsstrategie ist unbekannt")
     return {
+        "strategy": strategy,
         "host": host,
         "username": username,
         "remote_path": remote_path,

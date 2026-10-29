@@ -476,6 +476,7 @@ def init_db() -> None:
               private_key_ciphertext TEXT NOT NULL DEFAULT '',
               host_key TEXT NOT NULL DEFAULT '',
               rsync_options TEXT NOT NULL DEFAULT '-a --delete --stats',
+              strategy TEXT NOT NULL DEFAULT 'latest',
               interval_hours INTEGER NOT NULL DEFAULT 24,
               retention_days INTEGER NOT NULL DEFAULT 0,
               enabled INTEGER NOT NULL DEFAULT 1,
@@ -730,6 +731,11 @@ def init_db() -> None:
                     )
             except (TypeError, json.JSONDecodeError):
                 LOG.warning("Policy-Snapshot von Auftrag %s konnte nicht auf tar.zst migriert werden", command["id"])
+        mirror_columns = {row[1] for row in connection.execute("PRAGMA table_info(mirror_targets)")}
+        if "strategy" not in mirror_columns:
+            # Existing targets keep replicating the whole store until the
+            # operator switches them; only new ones start with the latest runs.
+            connection.execute("ALTER TABLE mirror_targets ADD COLUMN strategy TEXT NOT NULL DEFAULT 'full'")
         checker_defaults = CONFIG.get("checker", {})
         checker_interval = max(5, min(1440, int(checker_defaults.get("interval_minutes", 60))))
         checker_enabled = bool(checker_defaults.get("enabled", True))
@@ -1698,7 +1704,7 @@ def finish_mirror_run(
 
 
 def execute_mirror_run(run: sqlite3.Row) -> None:
-    """Replicate the whole backup store to one mirror and prune it if asked."""
+    """Replicate the newest runs or the whole backup store to one mirror."""
     run_id = int(run["id"])
     target_id = int(run["target_id"])
     with db() as connection:
@@ -1747,11 +1753,36 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
             LOG.error("Spiegelreplikation %s: %s", target["name"], summary)
             return
         account_prefix = str(application_settings()["username_prefix"])
+        latest = str(target["strategy"]) == "latest"
+        selection = mirror_module.latest_runs(HOME_ROOT, account_prefix) if latest else None
+        if selection is not None:
+            sections.append(
+                "Neuester Stand je Host:\n" + "\n".join(
+                    f"{account}: {run or 'kein vollständiger Lauf, Spiegel bleibt unverändert'}"
+                    for account, run in selection.items()
+                )
+            )
+            seed = subprocess.run(
+                mirror_module.ssh_command(
+                    username=str(target["username"]), host=str(target["host"]),
+                    remote_command=mirror_module.seed_command(str(target["remote_path"]), selection),
+                    key_path=str(key_path), known_hosts_path=str(known_hosts_path),
+                    port=int(target["ssh_port"]),
+                ),
+                capture_output=True, text=True, errors="replace", timeout=1800, check=False,
+            )
+            seeded = [line for line in seed.stdout.splitlines() if line.strip()]
+            sections.append(
+                f"Als Basis vom vorherigen Stand übernommen ({len(seeded)}):\n" + "\n".join(seeded)
+                if seeded else "Kein vorheriger Stand als Basis übernommen"
+            )
+            if seed.returncode != 0:
+                sections.append(f"Vorbereitung auf dem Ziel endete mit Status {seed.returncode}: {seed.stderr.strip()}")
         command = mirror_module.rsync_command(
             source_path=str(HOME_ROOT), username=str(target["username"]), host=str(target["host"]),
             remote_path=str(target["remote_path"]), options=options,
             key_path=str(key_path), known_hosts_path=str(known_hosts_path),
-            port=int(target["ssh_port"]), account_prefix=account_prefix,
+            port=int(target["ssh_port"]), account_prefix=account_prefix, selection=selection,
         )
         LOG.info("Spiegelreplikation %s gestartet: %s", target["name"], target["host"])
         publish_progress(sections + ["rsync laeuft ..."])
@@ -1766,7 +1797,8 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
         # rsync reports 24 when a file vanished mid-transfer; a live backup store
         # does that regularly and the replication itself is still complete.
         acceptable = return_code in {0, 24}
-        if acceptable and int(target["retention_days"]) > 0:
+        # The latest strategy already removed every older run with --delete.
+        if acceptable and not latest and int(target["retention_days"]) > 0:
             prune = subprocess.run(
                 mirror_module.ssh_command(
                     username=str(target["username"]), host=str(target["host"]),
@@ -1807,7 +1839,7 @@ def execute_mirror_run(run: sqlite3.Row) -> None:
                 )
         status = "success" if acceptable else "failure"
         summary = (
-            f"Replikation nach {target['host']} abgeschlossen"
+            f"{'Neuester Stand' if latest else 'Replikation'} nach {target['host']} abgeschlossen"
             + (f", {format_size(transferred)} uebertragen" if transferred is not None else "")
             if acceptable
             else f"rsync endete mit Status {return_code}"
@@ -3504,6 +3536,7 @@ def mirror_target_view(target: sqlite3.Row) -> dict[str, Any]:
     free = int(target["free_bytes"] or 0)
     item["free_percent"] = round(free / total * 100, 1) if total else None
     item["used_percent"] = round((total - free) / total * 100, 1) if total else 0
+    item["strategy_text"] = mirror_module.STRATEGIES.get(str(target["strategy"]), str(target["strategy"]))
     item["interval_text"] = mirror_module.describe_interval(int(target["interval_hours"]))
     item["interval_value"], item["interval_unit"] = mirror_module.interval_fields(
         int(target["interval_hours"])
@@ -3554,6 +3587,8 @@ def mirrors_page(request: Request):
         "default_options": mirror_module.DEFAULT_RSYNC_OPTIONS,
         "max_interval_days": mirror_module.MAX_INTERVAL_HOURS // 24,
         "history_options": mirror_module.HISTORY_RSYNC_OPTIONS,
+        "strategies": mirror_module.STRATEGIES,
+        "default_strategy": mirror_module.DEFAULT_STRATEGY,
         "source_path": str(HOME_ROOT),
         "message": request.query_params.get("message", ""),
     })
@@ -3572,6 +3607,7 @@ def mirror_create(
     interval_value: int = Form(24),
     interval_unit: str = Form("hours"),
     retention_days: int = Form(0),
+    strategy: str = Form(mirror_module.DEFAULT_STRATEGY),
     enabled: str | None = Form(None),
     csrf_token: str = Form(...),
 ):
@@ -3584,7 +3620,7 @@ def mirror_create(
         values = mirror_module.validated_target(
             host=host, username=username, remote_path=remote_path, ssh_port=ssh_port,
             interval_hours=mirror_module.interval_from_unit(interval_value, interval_unit),
-            retention_days=retention_days, rsync_options=rsync_options,
+            retention_days=retention_days, rsync_options=rsync_options, strategy=strategy,
         )
         key = mirror_module.normalized_private_key(private_key)
     except ValueError as exc:
@@ -3593,12 +3629,13 @@ def mirror_create(
         with db() as connection:
             cursor = connection.execute(
                 "INSERT INTO mirror_targets(name,host,ssh_port,username,remote_path,private_key_ciphertext,"
-                "rsync_options,interval_hours,retention_days,enabled,updated_by,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "rsync_options,strategy,interval_hours,retention_days,enabled,updated_by,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     name, values["host"], values["ssh_port"], values["username"], values["remote_path"],
-                    encrypt_deployment_token(key), values["rsync_options"], values["interval_hours"],
-                    values["retention_days"], bool(enabled), user["id"], now_iso(), now_iso(),
+                    encrypt_deployment_token(key), values["rsync_options"], values["strategy"],
+                    values["interval_hours"], values["retention_days"], bool(enabled), user["id"],
+                    now_iso(), now_iso(),
                 ),
             )
             target_id = int(cursor.lastrowid)
@@ -3630,6 +3667,7 @@ def mirror_detail(request: Request, target_id: int):
     return render(request, "mirror_detail.html", {
         "target": mirror_target_view(target),
         "max_interval_days": mirror_module.MAX_INTERVAL_HOURS // 24,
+        "strategies": mirror_module.STRATEGIES,
         "runs": runs,
         "busy": bool(active),
         "source_path": str(HOME_ROOT),
@@ -3651,6 +3689,7 @@ def mirror_update(
     interval_value: int = Form(24),
     interval_unit: str = Form("hours"),
     retention_days: int = Form(0),
+    strategy: str = Form(mirror_module.DEFAULT_STRATEGY),
     enabled: str | None = Form(None),
     csrf_token: str = Form(...),
 ):
@@ -3663,7 +3702,7 @@ def mirror_update(
         values = mirror_module.validated_target(
             host=host, username=username, remote_path=remote_path, ssh_port=ssh_port,
             interval_hours=mirror_module.interval_from_unit(interval_value, interval_unit),
-            retention_days=retention_days, rsync_options=rsync_options,
+            retention_days=retention_days, rsync_options=rsync_options, strategy=strategy,
         )
         key = mirror_module.normalized_private_key(private_key) if private_key.strip() else ""
     except ValueError as exc:
@@ -3681,20 +3720,23 @@ def mirror_update(
             )
             connection.execute(
                 "UPDATE mirror_targets SET name=?,host=?,ssh_port=?,username=?,remote_path=?,"
-                "rsync_options=?,interval_hours=?,retention_days=?,enabled=?,"
+                "rsync_options=?,strategy=?,interval_hours=?,retention_days=?,enabled=?,"
                 "private_key_ciphertext=CASE WHEN ?<>'' THEN ? ELSE private_key_ciphertext END,"
                 "host_key=CASE WHEN ? THEN '' ELSE host_key END,"
                 "updated_by=?,updated_at=? WHERE id=?",
                 (
                     name, values["host"], values["ssh_port"], values["username"], values["remote_path"],
-                    values["rsync_options"], values["interval_hours"], values["retention_days"],
-                    bool(enabled), key, encrypt_deployment_token(key) if key else "",
+                    values["rsync_options"], values["strategy"], values["interval_hours"],
+                    values["retention_days"], bool(enabled), key, encrypt_deployment_token(key) if key else "",
                     address_changed, user["id"], now_iso(), target_id,
                 ),
             )
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Ein Spiegelziel mit diesem Namen existiert bereits")
-    audit(request, "mirror.update", name, f"host={values['host']}", user_id=user["id"])
+    audit(
+        request, "mirror.update", name, f"host={values['host']} strategy={values['strategy']}",
+        user_id=user["id"],
+    )
     message = "Spiegelziel gespeichert"
     if address_changed:
         message += "; die Adresse hat sich geändert, bitte den Hostschlüssel neu abrufen"
