@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from portal_harness import PortalTestCase, hours_ahead, portal_app as app  # noqa: E402
+from portal_harness import PortalTestCase, hours_ahead, portal_core as core, portal_workers as workers  # noqa: E402
 
 
 GIB = 1024**3
@@ -54,15 +54,15 @@ class MirrorRunTestCase(PortalTestCase):
         super().setUp()
         self.remote = FakeRemote()
         self.subprocess_run.side_effect = self.remote
-        self.streaming = self.patch(app, "run_streaming", return_value=(0, RSYNC_STATS))
-        self.rsync = self.patch(app.mirror_module, "rsync_command", wraps=app.mirror_module.rsync_command)
+        self.streaming = self.patch(workers, "run_streaming", return_value=(0, RSYNC_STATS))
+        self.rsync = self.patch(workers.mirror_module, "rsync_command", wraps=workers.mirror_module.rsync_command)
         self.add_backup_run("backup_alpha", "20261030020000", complete=True)
         self.add_backup_run("backup_alpha", "20261031020000", complete=False)
         self.add_backup_run("backup_beta", "20261031020000", complete=False)
-        (app.HOME_ROOT / "lost+found").mkdir()
+        (core.HOME_ROOT / "lost+found").mkdir()
 
     def add_backup_run(self, account, run, *, complete):
-        directory = app.HOME_ROOT / account / run
+        directory = core.HOME_ROOT / account / run
         directory.mkdir(parents=True)
         if complete:
             (directory / ".backup-ok").touch()
@@ -71,9 +71,9 @@ class MirrorRunTestCase(PortalTestCase):
         """Queue a run for a new target and execute it the way the mirror worker does."""
         target_id = self.add_mirror_target(**target_columns)
         run_id = self.add_mirror_run(target_id, "queued")
-        run = app.claim_mirror_run()
+        run = workers.claim_mirror_run()
         self.assertEqual(run["id"], run_id)
-        app.execute_mirror_run(run)
+        workers.execute_mirror_run(run)
         return (
             self.row("SELECT * FROM mirror_runs WHERE id=?", run_id),
             self.row("SELECT * FROM mirror_targets WHERE id=?", target_id),
@@ -154,7 +154,7 @@ class TransferResultTests(MirrorRunTestCase):
         self.streaming.return_value = (12, "")
         _run, target = self.replicate(next_run_at=hours_ahead(216))
         retry = datetime.fromisoformat(target["next_run_at"]) - datetime.now(timezone.utc)
-        self.assertLess(abs(retry - timedelta(hours=app.MIRROR_RETRY_HOURS)), timedelta(minutes=1))
+        self.assertLess(abs(retry - timedelta(hours=workers.MIRROR_RETRY_HOURS)), timedelta(minutes=1))
 
     def test_a_failed_transfer_neither_prunes_nor_lists_foreign_entries(self):
         self.streaming.return_value = (12, "")
@@ -174,7 +174,7 @@ class TransferResultTests(MirrorRunTestCase):
         self.assertEqual(run["status"], "success")
         self.assertEqual(run["exit_code"], 0)
         self.assertEqual(run["transferred_bytes"], 1_234_567)
-        self.assertIn(app.format_size(1_234_567), run["summary"])
+        self.assertIn(core.format_size(1_234_567), run["summary"])
         self.assertEqual(target["last_message"], run["summary"])
 
     def test_success_leaves_the_regular_schedule_alone(self):
@@ -215,7 +215,7 @@ class TransferResultTests(MirrorRunTestCase):
 
 class RefusedRunTests(MirrorRunTestCase):
     def test_a_full_target_is_not_replicated_to(self):
-        self.remote.free = app.MIRROR_MIN_FREE_BYTES - 1
+        self.remote.free = workers.MIRROR_MIN_FREE_BYTES - 1
         run, target = self.replicate()
         self.streaming.assert_not_called()
         self.assertEqual(run["status"], "failure")
@@ -244,9 +244,9 @@ class RefusedRunTests(MirrorRunTestCase):
     def test_a_target_deleted_after_the_claim_ends_quietly(self):
         target_id = self.add_mirror_target()
         self.add_mirror_run(target_id, "queued")
-        run = app.claim_mirror_run()
+        run = workers.claim_mirror_run()
         self.execute("DELETE FROM mirror_targets WHERE id=?", target_id)
-        app.execute_mirror_run(run)
+        workers.execute_mirror_run(run)
         self.streaming.assert_not_called()
         self.assertEqual(self.count("mirror_runs"), 0)
 

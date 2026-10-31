@@ -132,18 +132,41 @@ def _import_portal(config: Path) -> Any:
     os.environ["BACKUP_PORTAL_CONFIG"] = str(config)
     try:
         import app
+        import core
     finally:
         if previous is None:
             del os.environ["BACKUP_PORTAL_CONFIG"]
         else:
             os.environ["BACKUP_PORTAL_CONFIG"] = previous
     # The failure paths log on purpose; a test asserts their result instead.
-    app.LOG.addHandler(logging.NullHandler())
-    app.LOG.propagate = False
+    core.LOG.addHandler(logging.NullHandler())
+    core.LOG.propagate = False
     return app
 
 
 portal_app = _import_portal(_write_config(ROOT))
+# app.py imported all of these already; this only names them for the tests.
+import core as portal_core  # noqa: E402
+import auth as portal_auth  # noqa: E402
+import rendering as portal_rendering  # noqa: E402
+import workers as portal_workers  # noqa: E402
+import system_status as portal_system_status  # noqa: E402
+import routes_auth as portal_routes_auth  # noqa: E402
+import routes_settings as portal_routes_settings  # noqa: E402
+import routes_checker as portal_routes_checker  # noqa: E402
+import routes_dashboard as portal_routes_dashboard  # noqa: E402
+import routes_mirrors as portal_routes_mirrors  # noqa: E402
+import routes_explorer as portal_routes_explorer  # noqa: E402
+import routes_policies as portal_routes_policies  # noqa: E402
+import routes_clients as portal_routes_clients  # noqa: E402
+import routes_agent_api as portal_routes_agent_api  # noqa: E402
+
+PORTAL_MODULES = (
+    portal_app, portal_core, portal_auth, portal_rendering, portal_workers, portal_system_status,
+    portal_routes_auth, portal_routes_settings, portal_routes_checker, portal_routes_dashboard,
+    portal_routes_mirrors, portal_routes_explorer, portal_routes_policies, portal_routes_clients,
+    portal_routes_agent_api,
+)
 SCRATCH = ROOT / "scratch"
 
 
@@ -162,19 +185,19 @@ def reset_portal() -> None:
     still waiting for the garbage collector would remove the -wal file of its
     successor once it closes.
     """
-    with closing(sqlite3.connect(portal_app.DB_PATH, timeout=30)) as connection, connection:
+    with closing(sqlite3.connect(portal_core.DB_PATH, timeout=30)) as connection, connection:
         connection.execute("PRAGMA foreign_keys=OFF")
         tables = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
         for (table,) in tables:
             connection.execute(f'DELETE FROM "{table}"')
-    portal_app.init_db()
-    for entry in portal_app.HOME_ROOT.iterdir():
+    portal_core.init_db()
+    for entry in portal_core.HOME_ROOT.iterdir():
         shutil.rmtree(entry)
-    portal_app.LOGIN_FAILURES.clear()
-    portal_app.PASSKEY_FLOWS.clear()
-    portal_app.AGENT_SCRIPT_CACHE = None
+    portal_auth.LOGIN_FAILURES.clear()
+    portal_auth.PASSKEY_FLOWS.clear()
+    portal_core.AGENT_SCRIPT_CACHE = None
     for name in ("SCHEDULER_THREAD", "CHECKER_THREAD", "MIRROR_THREAD", "STORAGE_THREAD"):
         setattr(portal_app, name, None)
 
@@ -211,12 +234,12 @@ class PortalTestCase(unittest.TestCase):
         self.subprocess_run = self.patch(subprocess, "run", side_effect=refuse_subprocess)
         self.subprocess_popen = self.patch(subprocess, "Popen", side_effect=refuse_subprocess)
         self.provisioned = self.patch(
-            portal_app, "provision_system_user", side_effect=lambda _username, home: home.mkdir()
+            portal_routes_clients, "provision_system_user", side_effect=lambda _username, home: home.mkdir()
         )
         self.discard_credentials = self.patch(portal_app, "discard_stale_mirror_credentials")
-        self.patch(portal_app, "write_run_payload", side_effect=self.scratch_payload)
-        self.patch(portal_app, "mirror_credentials", side_effect=self.scratch_credentials)
-        self.patch(portal_app, "systemd_active", return_value=False)
+        self.patch(portal_workers, "write_run_payload", side_effect=self.scratch_payload)
+        self.patch(portal_workers, "mirror_credentials", side_effect=self.scratch_credentials)
+        self.patch(portal_routes_settings, "systemd_active", return_value=False)
         self.patch(portal_app, "systemd_unit_details", side_effect=lambda unit: {
             "name": unit, "kind": "systemd", "status": "unknown", "result": "Nicht verfügbar",
             "started_at": "", "finished_at": "", "details": "",
@@ -247,19 +270,19 @@ class PortalTestCase(unittest.TestCase):
     # Database access
 
     def execute(self, sql: str, *params: Any) -> None:
-        with closing(portal_app.db()) as connection, connection:
+        with closing(portal_core.db()) as connection, connection:
             connection.execute(sql, params)
 
     def insert(self, table: str, **values: Any) -> int:
         columns = ",".join(values)
         marks = ",".join("?" for _ in values)
-        with closing(portal_app.db()) as connection, connection:
+        with closing(portal_core.db()) as connection, connection:
             return connection.execute(
                 f"INSERT INTO {table}({columns}) VALUES({marks})", tuple(values.values())
             ).lastrowid
 
     def rows(self, sql: str, *params: Any) -> list[dict[str, Any]]:
-        with closing(portal_app.db()) as connection:
+        with closing(portal_core.db()) as connection:
             return [dict(row) for row in connection.execute(sql, params).fetchall()]
 
     def row(self, sql: str, *params: Any) -> dict[str, Any] | None:
@@ -273,7 +296,7 @@ class PortalTestCase(unittest.TestCase):
 
     def client(self) -> PortalClient:
         client = PortalClient(
-            portal_app.app, base_url=f"https://{portal_app.PORTAL_FQDN}", follow_redirects=False
+            portal_app.app, base_url=f"https://{portal_core.PORTAL_FQDN}", follow_redirects=False
         )
         self.addCleanup(client.close)
         return client
@@ -288,8 +311,8 @@ class PortalTestCase(unittest.TestCase):
         client.csrf_token = secrets.token_urlsafe(32)
         client.user_id = user_id
         self.insert(
-            "sessions", token_hash=portal_app.token_hash(raw), user_id=user_id, csrf_token=client.csrf_token,
-            expires_at=portal_app.now_ts() + expires_in, created_at=portal_app.now_iso(),
+            "sessions", token_hash=portal_core.token_hash(raw), user_id=user_id, csrf_token=client.csrf_token,
+            expires_at=portal_core.now_ts() + expires_in, created_at=portal_core.now_iso(),
         )
         client.cookies.set("backup_portal_session", raw)
         return client
@@ -299,8 +322,8 @@ class PortalTestCase(unittest.TestCase):
     def add_user(self, username: str, role: str, *, password: str | None = None, active: int = 1) -> int:
         return self.insert(
             "users", username=username, display_name=username, role=role, active=active,
-            password_hash=portal_app.hash_password(password) if password else "!",
-            created_at=portal_app.now_iso(),
+            password_hash=portal_core.hash_password(password) if password else "!",
+            created_at=portal_core.now_iso(),
         )
 
     def default_policy_id(self) -> int:
@@ -308,7 +331,7 @@ class PortalTestCase(unittest.TestCase):
 
     def add_policy(self, name: str, **columns: Any) -> int:
         return self.insert(
-            "backup_policies", name=name, created_at=portal_app.now_iso(), updated_at=portal_app.now_iso(), **columns
+            "backup_policies", name=name, created_at=portal_core.now_iso(), updated_at=portal_core.now_iso(), **columns
         )
 
     def add_client(self, slug: str, *, token: str | None = None, **columns: Any) -> SimpleNamespace:
@@ -317,8 +340,8 @@ class PortalTestCase(unittest.TestCase):
         username = f"backup_{slug}"
         values: dict[str, Any] = {
             "slug": slug, "username": username, "source_hostname": f"{slug}.raven.test",
-            "home_path": str(portal_app.HOME_ROOT / username), "policy_id": self.default_policy_id(),
-            "agent_token_hash": portal_app.token_hash(token), "created_at": portal_app.now_iso(),
+            "home_path": str(portal_core.HOME_ROOT / username), "policy_id": self.default_policy_id(),
+            "agent_token_hash": portal_core.token_hash(token), "created_at": portal_core.now_iso(),
         }
         values.update(columns)
         client_id = self.insert("clients", **values)
@@ -329,7 +352,7 @@ class PortalTestCase(unittest.TestCase):
 
     def add_command(self, client_id: int, status: str = "queued", **columns: Any) -> int:
         values: dict[str, Any] = {
-            "client_id": client_id, "reason": "manual", "status": status, "requested_at": portal_app.now_iso(),
+            "client_id": client_id, "reason": "manual", "status": status, "requested_at": portal_core.now_iso(),
         }
         values.update(columns)
         return self.insert("backup_commands", **values)
@@ -337,16 +360,16 @@ class PortalTestCase(unittest.TestCase):
     def add_mirror_target(self, name: str = "box1", **columns: Any) -> int:
         values: dict[str, Any] = {
             "name": name, "host": "mirror.raven.test", "ssh_port": 22, "username": "mirror",
-            "remote_path": "/srv/raven", "private_key_ciphertext": portal_app.encrypt_deployment_token("key\n"),
+            "remote_path": "/srv/raven", "private_key_ciphertext": portal_core.encrypt_deployment_token("key\n"),
             "host_key": "mirror.raven.test ssh-ed25519 AAAA", "strategy": "latest", "interval_hours": 216,
-            "created_at": portal_app.now_iso(), "updated_at": portal_app.now_iso(),
+            "created_at": portal_core.now_iso(), "updated_at": portal_core.now_iso(),
         }
         values.update(columns)
         return self.insert("mirror_targets", **values)
 
     def add_mirror_run(self, target_id: int, status: str, **columns: Any) -> int:
         values: dict[str, Any] = {
-            "target_id": target_id, "mode": "scheduled", "status": status, "requested_at": portal_app.now_iso(),
+            "target_id": target_id, "mode": "scheduled", "status": status, "requested_at": portal_core.now_iso(),
         }
         values.update(columns)
         return self.insert("mirror_runs", **values)

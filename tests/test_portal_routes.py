@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fastapi.routing import APIRoute  # noqa: E402
 
 from portal_harness import (  # noqa: E402
-    AGENT_SCRIPT, WORKER_THREADS, PortalTestCase, hours_ago, hours_ahead, portal_app as app,
+    AGENT_SCRIPT, PORTAL_MODULES, WORKER_THREADS, PortalTestCase, hours_ago, hours_ahead, portal_app as app,
+    portal_auth as auth, portal_core as core, portal_workers as workers,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -62,7 +63,7 @@ def bearer(token):
 
 
 class FrozenClock(datetime):
-    """Stand in for app.datetime so a test can step from one schedule slot to the next."""
+    """Stand in for the portal's datetime so a test can step from one schedule slot to the next."""
 
     current = None
 
@@ -169,7 +170,7 @@ class RoleTests(PortalTestCase):
             "/clients/new", slug="bravo", source_hostname="bravo.raven.test", policy_id=self.default_policy_id()
         )
         self.assertEqual(response.status_code, 303)
-        self.provisioned.assert_called_once_with("backup_bravo", app.HOME_ROOT / "backup_bravo")
+        self.provisioned.assert_called_once_with("backup_bravo", core.HOME_ROOT / "backup_bravo")
         created = self.row("SELECT * FROM clients WHERE slug='bravo'")
         self.assertEqual(created["username"], "backup_bravo")
         self.assertEqual(self.subprocess_run.call_count, 0)
@@ -279,17 +280,17 @@ class SessionTests(PortalTestCase):
         client = self.client()
         self.login(client)
         raw = client.cookies["backup_portal_session"]
-        self.assertEqual(self.row("SELECT token_hash FROM sessions")["token_hash"], app.token_hash(raw))
+        self.assertEqual(self.row("SELECT token_hash FROM sessions")["token_hash"], core.token_hash(raw))
 
     def test_a_wrong_password_opens_no_session(self):
-        self.patch(app.time, "sleep")
+        self.patch(time, "sleep")
         response = self.login(self.client(), "not the password")
         self.assertEqual(response.status_code, 401)
         self.assertNotIn("set-cookie", response.headers)
         self.assertEqual(self.count("sessions"), 0)
 
     def test_an_unknown_user_gets_the_same_answer_as_a_wrong_password(self):
-        self.patch(app.time, "sleep")
+        self.patch(time, "sleep")
         unknown = self.client().post("/login", data={"username": "nobody", "password": "whatever"})
         wrong = self.login(self.client(), "not the password")
         self.assertEqual(unknown.status_code, wrong.status_code)
@@ -297,13 +298,13 @@ class SessionTests(PortalTestCase):
         self.assertIn("Benutzername oder Passwort ist falsch", wrong.text)
 
     def test_too_many_failures_block_even_the_right_password(self):
-        app.LOGIN_FAILURES["testclient"] = [time.time()] * 8
+        auth.LOGIN_FAILURES["testclient"] = [time.time()] * 8
         response = self.login(self.client())
         self.assertEqual(response.status_code, 429)
         self.assertEqual(self.count("sessions"), 0)
 
     def test_a_disabled_user_cannot_log_in(self):
-        self.patch(app.time, "sleep")
+        self.patch(time, "sleep")
         self.execute("UPDATE users SET active=0 WHERE username='operator'")
         self.assertEqual(self.login(self.client()).status_code, 401)
 
@@ -448,7 +449,7 @@ class AgentPollTests(AgentTestCase):
         self.assertEqual(body["command_id"], command_id)
 
     def test_a_fresh_claim_stays_with_the_agent(self):
-        command_id = self.add_command(self.agent.id, status="claimed", claimed_at=app.now_iso())
+        command_id = self.add_command(self.agent.id, status="claimed", claimed_at=core.now_iso())
         self.assertEqual(self.poll().json()["action"], "none")
         self.assertEqual(self.command(command_id)["status"], "claimed")
 
@@ -456,7 +457,7 @@ class AgentPollTests(AgentTestCase):
         command_id = self.add_command(self.agent.id)
         self.insert(
             "policy_cleanup_runs", policy_id=self.default_policy_id(), policy_name="x", status="running",
-            requested_at=app.now_iso(),
+            requested_at=core.now_iso(),
         )
         self.assertEqual(self.poll().json()["action"], "none")
         self.assertEqual(self.command(command_id)["status"], "queued")
@@ -465,7 +466,7 @@ class AgentPollTests(AgentTestCase):
         self.execute("UPDATE clients SET agent_config_version=5 WHERE id=?", self.agent.id)
         update = self.poll(config_version=4).json()["config_update"]
         self.assertEqual(update["version"], 5)
-        config = app.tomllib.loads(base64.b64decode(update["content_b64"]).decode("utf-8"))
+        config = core.tomllib.loads(base64.b64decode(update["content_b64"]).decode("utf-8"))
         self.assertEqual(config["backup"]["config_version"], 5)
         self.assertEqual(config["backup"]["expected_source_hostname"], self.agent.hostname)
         self.assertEqual(config["status"]["token"], self.agent.token)
@@ -485,10 +486,10 @@ class AgentPollTests(AgentTestCase):
         # build_agent_config pastes the password into the TOML without escaping
         # it. The agent then receives a file it cannot parse.
         self.execute(
-            "UPDATE smtp_settings SET password_ciphertext=?", app.encrypt_deployment_token('pa"ss\\word')
+            "UPDATE smtp_settings SET password_ciphertext=?", core.encrypt_deployment_token('pa"ss\\word')
         )
         update = self.poll(config_version=0).json()["config_update"]
-        config = app.tomllib.loads(base64.b64decode(update["content_b64"]).decode("utf-8"))
+        config = core.tomllib.loads(base64.b64decode(update["content_b64"]).decode("utf-8"))
         self.assertEqual(config["smtp"]["password"], 'pa"ss\\word')
 
     def test_a_different_script_digest_gets_the_current_script(self):
@@ -690,7 +691,7 @@ class CloseDeadRunTests(AgentTestCase):
         self.assertEqual(len(self.events()), 1)
 
     def test_a_queued_or_claimed_command_is_no_open_run(self):
-        claimed = self.add_command(self.agent.id, status="claimed", claimed_at=app.now_iso())
+        claimed = self.add_command(self.agent.id, status="claimed", claimed_at=core.now_iso())
         queued = self.add_command(self.agent.id, status="queued")
         self.poll()
         self.assertEqual(self.command(claimed)["status"], "claimed")
@@ -706,10 +707,10 @@ class CloseDeadRunTests(AgentTestCase):
 
     def test_the_host_gets_a_scheduled_command_afterwards(self):
         self.open_run()
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.commands_in("queued"), 0)
         self.assertEqual(self.poll().json()["action"], "none")
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         body = self.poll().json()
         self.assertEqual(body["action"], "backup")
         self.assertEqual(body["reason"], "schedule")
@@ -725,8 +726,8 @@ class CloseDeadRunTests(AgentTestCase):
 
 
 class ReleaseSilentAgentsTests(AgentTestCase):
-    SILENT = app.SILENT_AGENT_HOURS + 1
-    RECENT = app.SILENT_AGENT_HOURS - 1
+    SILENT = workers.SILENT_AGENT_HOURS + 1
+    RECENT = workers.SILENT_AGENT_HOURS - 1
 
     def silent_run(self, hours):
         self.execute(
@@ -736,7 +737,7 @@ class ReleaseSilentAgentsTests(AgentTestCase):
 
     def test_a_run_older_than_the_limit_is_closed(self):
         command_id = self.silent_run(self.SILENT)
-        app.release_silent_agents()
+        workers.release_silent_agents()
         row = self.command(command_id)
         self.assertEqual(row["status"], "failure")
         self.assertEqual(row["message"], LATE_REPORT)
@@ -745,14 +746,14 @@ class ReleaseSilentAgentsTests(AgentTestCase):
 
     def test_a_younger_run_stays_open(self):
         command_id = self.silent_run(self.RECENT)
-        app.release_silent_agents()
+        workers.release_silent_agents()
         self.assertEqual(self.command(command_id)["status"], "running")
         self.assertEqual(self.client_row()["last_event"], "started")
         self.assertEqual(self.events(), [])
 
     def test_a_silent_command_alone_is_enough(self):
         command_id = self.add_command(self.agent.id, status="running", started_at=hours_ago(self.SILENT))
-        app.release_silent_agents()
+        workers.release_silent_agents()
         self.assertEqual(self.command(command_id)["status"], "failure")
 
     def test_a_silent_started_event_alone_is_enough(self):
@@ -760,31 +761,31 @@ class ReleaseSilentAgentsTests(AgentTestCase):
             "UPDATE clients SET last_event='started',last_event_at=? WHERE id=?",
             hours_ago(self.SILENT), self.agent.id,
         )
-        app.release_silent_agents()
+        workers.release_silent_agents()
         self.assertEqual(self.client_row()["last_event"], "failure")
 
     def test_only_the_silent_host_is_closed(self):
         command_id = self.silent_run(self.SILENT)
         other_command = self.add_command(self.other.id, status="running", started_at=hours_ago(self.RECENT))
-        app.release_silent_agents()
+        workers.release_silent_agents()
         self.assertEqual(self.command(command_id)["status"], "failure")
         self.assertEqual(self.command(other_command)["status"], "running")
 
     def test_running_it_twice_writes_one_event(self):
         self.silent_run(self.SILENT)
-        app.release_silent_agents()
-        app.release_silent_agents()
+        workers.release_silent_agents()
+        workers.release_silent_agents()
         self.assertEqual(len(self.events()), 1)
 
     def test_a_closed_host_is_free_for_the_next_command(self):
         self.silent_run(self.SILENT)
-        app.release_silent_agents()
-        app.enqueue_due_schedules()
+        workers.release_silent_agents()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.commands_in("queued"), 1)
 
     def test_a_late_success_report_overrides_the_closure(self):
         command_id = self.silent_run(self.SILENT)
-        app.release_silent_agents()
+        workers.release_silent_agents()
         self.assertEqual(self.report("success", command_id=command_id, run_id="run-1").status_code, 200)
         row = self.command(command_id)
         self.assertEqual(row["status"], "success")
@@ -796,7 +797,7 @@ class ReleaseSilentAgentsTests(AgentTestCase):
 
     def test_a_late_command_state_overrides_the_closure(self):
         command_id = self.silent_run(self.SILENT)
-        app.release_silent_agents()
+        workers.release_silent_agents()
         self.set_command_state(command_id, status="success", message="Backup erfolgreich")
         row = self.command(command_id)
         self.assertEqual(row["status"], "success")
@@ -804,9 +805,9 @@ class ReleaseSilentAgentsTests(AgentTestCase):
 
     def test_a_late_success_satisfies_the_slot(self):
         command_id = self.silent_run(self.SILENT)
-        app.release_silent_agents()
+        workers.release_silent_agents()
         self.report("success", command_id=command_id)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.commands_in("queued"), 0)
         self.assertEqual(self.commands_in("satisfied"), 1)
 
@@ -821,10 +822,12 @@ class EnqueueDueSchedulesTests(AgentTestCase):
 
     def freeze(self, moment):
         FrozenClock.current = moment
-        self.patch(app, "datetime", new=FrozenClock)
+        for module in PORTAL_MODULES:
+            if hasattr(module, "datetime"):
+                self.patch(module, "datetime", new=FrozenClock)
 
     def test_a_due_host_gets_a_command_with_the_policy(self):
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         commands = self.queued()
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0]["client_id"], self.agent.id)
@@ -836,28 +839,28 @@ class EnqueueDueSchedulesTests(AgentTestCase):
 
     def test_every_pass_of_one_slot_creates_one_command(self):
         for _ in range(3):
-            app.enqueue_due_schedules()
+            workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands"), 1)
 
     def test_a_failed_command_is_not_repeated_within_its_slot(self):
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.execute("UPDATE backup_commands SET status='failure'")
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands"), 1)
 
     def test_the_next_slot_creates_the_next_command(self):
         start = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
         self.freeze(start)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.execute("UPDATE backup_commands SET status='failure'")
         FrozenClock.current = start + timedelta(hours=24)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands"), 2)
         self.assertEqual(len(self.queued()), 1)
 
     def test_every_host_gets_its_own_command(self):
         self.add_client("charlie")
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands", "status='queued'"), 2)
 
     def test_a_host_with_an_open_command_is_skipped(self):
@@ -865,34 +868,34 @@ class EnqueueDueSchedulesTests(AgentTestCase):
             with self.subTest(status):
                 self.execute("DELETE FROM backup_commands")
                 self.add_command(self.agent.id, status=status)
-                app.enqueue_due_schedules()
+                workers.enqueue_due_schedules()
                 self.assertEqual(self.count("backup_commands"), 1)
                 self.assertEqual(self.count("backup_commands", "reason='schedule'"), 0)
 
     def test_a_host_with_a_started_run_is_skipped(self):
         self.execute("UPDATE clients SET last_event='started' WHERE id=?", self.agent.id)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands"), 0)
 
     def test_a_skipped_host_gets_its_command_once_the_run_ended(self):
         self.execute("UPDATE clients SET last_event='started' WHERE id=?", self.agent.id)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.execute("UPDATE clients SET last_event='failure' WHERE id=?", self.agent.id)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands", "status='queued'"), 1)
 
     def test_a_host_during_a_policy_cleanup_is_skipped(self):
         self.insert(
             "policy_cleanup_runs", policy_id=self.default_policy_id(), policy_name="x", status="queued",
-            requested_at=app.now_iso(),
+            requested_at=core.now_iso(),
         )
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands"), 0)
 
     def test_a_successful_host_only_gets_a_bookkeeping_row(self):
-        self.execute("UPDATE clients SET last_success_at=? WHERE id=?", app.now_iso(), self.agent.id)
-        app.enqueue_due_schedules()
-        app.enqueue_due_schedules()
+        self.execute("UPDATE clients SET last_success_at=? WHERE id=?", core.now_iso(), self.agent.id)
+        workers.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         rows = self.rows("SELECT status FROM backup_commands")
         self.assertEqual([row["status"] for row in rows], ["satisfied"])
 
@@ -900,16 +903,16 @@ class EnqueueDueSchedulesTests(AgentTestCase):
         self.add_client("charlie", active=0)
         self.add_client("delta", agent_token_hash=None)
         self.execute("UPDATE clients SET active=0 WHERE id=?", self.agent.id)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.count("backup_commands"), 0)
 
     def host_with_jitter(self, slot, wanted, **columns):
         """Add a host of a spread 12:00 policy whose stable jitter for this slot suits the test."""
         policy_id = self.add_policy("Spread", schedule_hour=12, start_offset_minutes=60)
         jitter, slug = next(
-            (app.backup_schedule.slot_jitter(slug, slot, 60), slug)
+            (workers.backup_schedule.slot_jitter(slug, slot, 60), slug)
             for slug in (f"host{index}" for index in range(200))
-            if wanted(app.backup_schedule.slot_jitter(slug, slot, 60))
+            if wanted(workers.backup_schedule.slot_jitter(slug, slot, 60))
         )
         return self.add_client(slug, policy_id=policy_id, **columns), jitter
 
@@ -917,10 +920,10 @@ class EnqueueDueSchedulesTests(AgentTestCase):
         slot = datetime(2026, 10, 30, 12, 0).astimezone()
         host, jitter = self.host_with_jitter(slot, lambda minutes: minutes >= 30)
         self.freeze(slot + timedelta(minutes=jitter - 1))
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.commands_in("queued", host), 0)
         FrozenClock.current = slot + timedelta(minutes=jitter)
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.commands_in("queued", host), 1)
 
     @unittest.expectedFailure
@@ -934,7 +937,7 @@ class EnqueueDueSchedulesTests(AgentTestCase):
             slot, lambda minutes: minutes <= -30, last_success_at=previous_success
         )
         self.freeze(slot + timedelta(minutes=jitter + 1))
-        app.enqueue_due_schedules()
+        workers.enqueue_due_schedules()
         self.assertEqual(self.commands_in("queued", host), 1)
 
 
@@ -1021,21 +1024,21 @@ class PolicyUpdateTests(AgentTestCase):
         self.assertEqual(body["schedule"]["hour"], 3)
         self.assertEqual(body["schedule"]["minute"], 15)
         self.assertEqual(body["schedule"]["interval_hours"], 12)
-        config = app.tomllib.loads(base64.b64decode(body["config_update"]["content_b64"]).decode("utf-8"))
+        config = core.tomllib.loads(base64.b64decode(body["config_update"]["content_b64"]).decode("utf-8"))
         self.assertEqual(config["schedule"], {"hour": 3, "minute": 15, "interval_hours": 12})
 
 
 class MirrorScheduleTestCase(PortalTestCase):
     def retry(self, target_id):
-        with closing(app.db()) as connection, connection:
-            app.schedule_mirror_retry(connection, target_id)
+        with closing(core.db()) as connection, connection:
+            workers.schedule_mirror_retry(connection, target_id)
 
     def next_run_at(self, target_id):
         return self.row("SELECT next_run_at FROM mirror_targets WHERE id=?", target_id)["next_run_at"]
 
     def assert_pulled_forward(self, target_id):
         distance = datetime.fromisoformat(self.next_run_at(target_id)) - datetime.now(timezone.utc)
-        self.assertLess(abs(distance - timedelta(hours=app.MIRROR_RETRY_HOURS)), timedelta(minutes=1))
+        self.assertLess(abs(distance - timedelta(hours=workers.MIRROR_RETRY_HOURS)), timedelta(minutes=1))
 
 
 class ScheduleMirrorRetryTests(MirrorScheduleTestCase):
@@ -1045,7 +1048,7 @@ class ScheduleMirrorRetryTests(MirrorScheduleTestCase):
         self.assert_pulled_forward(target_id)
 
     def test_never_moves_a_nearer_run_later(self):
-        for hours in (app.MIRROR_RETRY_HOURS - 1, 1, -1):
+        for hours in (workers.MIRROR_RETRY_HOURS - 1, 1, -1):
             with self.subTest(hours):
                 next_run_at = hours_ahead(hours)
                 target_id = self.add_mirror_target(f"box{hours}", next_run_at=next_run_at)
@@ -1069,7 +1072,7 @@ class FinishMirrorRunTests(MirrorScheduleTestCase):
     def finish(self, status, **columns):
         target_id = self.add_mirror_target(**columns)
         run_id = self.add_mirror_run(target_id, "running", started_at=hours_ago(1))
-        app.finish_mirror_run(run_id, target_id, status, exit_code=0, summary="Ergebnis", output="Ausgabe")
+        workers.finish_mirror_run(run_id, target_id, status, exit_code=0, summary="Ergebnis", output="Ausgabe")
         return target_id, run_id
 
     def test_a_failure_pulls_the_next_run_forward(self):
@@ -1153,17 +1156,17 @@ class StartupTests(MirrorScheduleTestCase):
 
 class CheckerMirrorStateTests(PortalTestCase):
     def test_the_states_are_wrapped_for_the_checker(self):
-        self.assertEqual(app.checker_mirror_states(), {"mirrors": []})
+        self.assertEqual(workers.checker_mirror_states(), {"mirrors": []})
 
     def test_only_enabled_targets_are_reported(self):
         self.add_mirror_target("box1")
         self.add_mirror_target("box2", enabled=0)
-        states = app.checker_mirror_states()["mirrors"]
+        states = workers.checker_mirror_states()["mirrors"]
         self.assertEqual([state["name"] for state in states], ["box1"])
 
     def test_every_field_of_the_alarm_is_reported(self):
         self.add_mirror_target(last_status="failure", last_message="rsync endete mit Status 10", last_run_at="x")
-        state = app.checker_mirror_states()["mirrors"][0]
+        state = workers.checker_mirror_states()["mirrors"][0]
         self.assertEqual(
             state,
             {
@@ -1178,13 +1181,13 @@ class CheckerMirrorStateTests(PortalTestCase):
         self.add_mirror_run(target_id, "success", finished_at=older)
         self.add_mirror_run(target_id, "success", finished_at=newer)
         self.add_mirror_run(target_id, "failure", finished_at=failed)
-        self.assertEqual(app.checker_mirror_states()["mirrors"][0]["last_success_at"], newer)
+        self.assertEqual(workers.checker_mirror_states()["mirrors"][0]["last_success_at"], newer)
 
     def test_last_success_at_stays_with_its_own_target(self):
         first = self.add_mirror_target("box1")
         self.add_mirror_target("box2")
         self.add_mirror_run(first, "success", finished_at=hours_ago(1))
-        states = {state["name"]: state for state in app.checker_mirror_states()["mirrors"]}
+        states = {state["name"]: state for state in workers.checker_mirror_states()["mirrors"]}
         self.assertIsNotNone(states["box1"]["last_success_at"])
         self.assertIsNone(states["box2"]["last_success_at"])
 
@@ -1195,7 +1198,7 @@ class CheckerMirrorStateTests(PortalTestCase):
         self.add_mirror_target("broken", last_status="failure", last_message="rsync endete mit Status 10")
         results = {
             result.user: result
-            for result in backup_check.mirror_results(app.checker_mirror_states()["mirrors"], now)
+            for result in backup_check.mirror_results(workers.checker_mirror_states()["mirrors"], now)
         }
         self.assertEqual(results["MIRROR_healthy"].status, "OK")
         self.assertEqual(results["MIRROR_broken"].status, "ERROR")

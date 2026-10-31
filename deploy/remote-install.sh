@@ -53,6 +53,7 @@ install_tree() {
     rm -rf "$app/templates" "$app/static"
     cp -a "$source/portal/templates" "$source/portal/static" "$app/"
     chown -R root:root "$app/templates" "$app/static"
+    chmod -R go= "$app/templates" "$app/static"
 }
 
 snapshot() {

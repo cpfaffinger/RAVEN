@@ -116,6 +116,20 @@ require_supported_os() {
 require_project_files() {
     local required=(
         "portal/app.py"
+        "portal/core.py"
+        "portal/auth.py"
+        "portal/rendering.py"
+        "portal/workers.py"
+        "portal/system_status.py"
+        "portal/routes_auth.py"
+        "portal/routes_settings.py"
+        "portal/routes_checker.py"
+        "portal/routes_dashboard.py"
+        "portal/routes_mirrors.py"
+        "portal/routes_explorer.py"
+        "portal/routes_policies.py"
+        "portal/routes_clients.py"
+        "portal/routes_agent_api.py"
         "portal/run.py"
         "portal/requirements.txt"
         "portal/backup-portal.service"
@@ -915,6 +929,20 @@ install_application() {
     install -d -o root -g root -m 0700 "$CONFIG_DIR" "$DATA_DIR" "$CHECKER_DATA_DIR"
 
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/app.py" "$APP_DIR/app.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/core.py" "$APP_DIR/core.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/auth.py" "$APP_DIR/auth.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/rendering.py" "$APP_DIR/rendering.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/workers.py" "$APP_DIR/workers.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/system_status.py" "$APP_DIR/system_status.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_auth.py" "$APP_DIR/routes_auth.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_settings.py" "$APP_DIR/routes_settings.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_checker.py" "$APP_DIR/routes_checker.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_dashboard.py" "$APP_DIR/routes_dashboard.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_mirrors.py" "$APP_DIR/routes_mirrors.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_explorer.py" "$APP_DIR/routes_explorer.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_policies.py" "$APP_DIR/routes_policies.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_clients.py" "$APP_DIR/routes_clients.py"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/routes_agent_api.py" "$APP_DIR/routes_agent_api.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/run.py" "$APP_DIR/run.py"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/requirements.txt" "$APP_DIR/requirements.txt"
     install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/README.md" "$APP_DIR/README.md"
@@ -1006,7 +1034,7 @@ ensure_admin() {
 import json
 import os
 import sys
-import app
+import core
 
 username = sys.argv[1]
 smtp_host, smtp_port, smtp_username, smtp_from, smtp_to = sys.argv[2:7]
@@ -1016,12 +1044,12 @@ if password.endswith("\n"):
 smtp_password = os.fdopen(4, encoding="utf-8").read()
 if smtp_password.endswith("\n"):
     smtp_password = smtp_password[:-1]
-app.init_db()
-with app.db() as connection:
+core.init_db()
+with core.db() as connection:
     current_smtp = connection.execute("SELECT password_ciphertext FROM smtp_settings WHERE id=1").fetchone()
     smtp_ciphertext = current_smtp["password_ciphertext"] if current_smtp else ""
     if smtp_password:
-        smtp_ciphertext = app.encrypt_deployment_token(smtp_password)
+        smtp_ciphertext = core.encrypt_deployment_token(smtp_password)
     admin_email = smtp_to.strip()
     connection.execute(
         "INSERT INTO smtp_settings(id,enabled,host,port,username,password_ciphertext,from_address,"
@@ -1029,10 +1057,10 @@ with app.db() as connection:
         "ON CONFLICT(id) DO UPDATE SET enabled=1,host=excluded.host,port=excluded.port,"
         "username=excluded.username,password_ciphertext=excluded.password_ciphertext,"
         "from_address=excluded.from_address,recipients_json=excluded.recipients_json,updated_at=excluded.updated_at",
-        (smtp_host, int(smtp_port), smtp_username, smtp_ciphertext, smtp_from, "[]", app.now_iso()),
+        (smtp_host, int(smtp_port), smtp_username, smtp_ciphertext, smtp_from, "[]", core.now_iso()),
     )
     existing = connection.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
-    encoded = app.hash_password(password)
+    encoded = core.hash_password(password)
     if existing:
         connection.execute(
             "UPDATE users SET password_hash=?,role='admin',email=?,receive_notifications=1,active=1 WHERE id=?",
@@ -1044,12 +1072,12 @@ with app.db() as connection:
         connection.execute(
             "INSERT INTO users(username,display_name,password_hash,role,email,receive_notifications,created_at) "
             "VALUES(?,?,?,?,?,1,?)",
-            (username, "Administrator", encoded, "admin", admin_email, app.now_iso()),
+            (username, "Administrator", encoded, "admin", admin_email, core.now_iso()),
         )
         action = "installer.admin_create"
     connection.execute(
         "INSERT INTO audit_log(user_id,action,target,details,ip,created_at) VALUES(NULL,?,?,?,?,?)",
-        (action, username, "local root installer", "127.0.0.1", app.now_iso()),
+        (action, username, "local root installer", "127.0.0.1", core.now_iso()),
     )
 print(f"    Admin bereit: {username}")
 PY
