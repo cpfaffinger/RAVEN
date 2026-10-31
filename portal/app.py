@@ -102,6 +102,8 @@ STORAGE_STATE: dict[str, Any] = {
 # directory created meanwhile, which for a large store takes many hours on a
 # home-line uplink. The limit only catches a hung transfer.
 MIRROR_TIMEOUT_SECONDS = 86400
+MIRROR_RETRY_HOURS = 12
+SILENT_AGENT_HOURS = 48
 # Below this the target cannot even hold rsync's temporary files, so a run
 # would only end in a broken pipe after a few minutes.
 MIRROR_MIN_FREE_BYTES = 1024**3
@@ -1301,6 +1303,17 @@ def write_run_payload(name: str, run: sqlite3.Row, payload: dict[str, Any]) -> P
     return path
 
 
+def checker_mirror_states() -> dict[str, Any]:
+    """Return the enabled mirrors so a failed replication alarms like a stale backup."""
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT t.name,t.interval_hours,t.last_status,t.last_message,t.last_run_at,"
+            "(SELECT MAX(r.finished_at) FROM mirror_runs r WHERE r.target_id=t.id AND r.status='success') "
+            "AS last_success_at FROM mirror_targets t WHERE t.enabled=1 ORDER BY t.id"
+        ).fetchall()
+    return {"mirrors": [dict(row) for row in rows]}
+
+
 def checker_age_limits() -> dict[str, float]:
     """Return the backup age per target account after which the checker alarms."""
     with db() as connection:
@@ -1521,6 +1534,8 @@ def execute_checker_run(run: sqlite3.Row) -> None:
         payload_paths.append(alerts_path)
         cleanup_path = write_run_payload("cleanup", run, checker_cleanup_policies())
         payload_paths.append(cleanup_path)
+        mirrors_path = write_run_payload("mirrors", run, checker_mirror_states())
+        payload_paths.append(mirrors_path)
         command = [
             sys.executable,
             str(CHECKER_SCRIPT),
@@ -1534,6 +1549,8 @@ def execute_checker_run(run: sqlite3.Row) -> None:
             str(alerts_path),
             "--cleanup-json-file",
             str(cleanup_path),
+            "--mirrors-json-file",
+            str(mirrors_path),
             *flags[str(run["mode"])],
         ]
         process = subprocess.run(
@@ -1682,6 +1699,15 @@ def claim_mirror_run() -> sqlite3.Row | None:
         return connection.execute("SELECT * FROM mirror_runs WHERE id=?", (run["id"],)).fetchone()
 
 
+def schedule_mirror_retry(connection: sqlite3.Connection, target_id: int) -> None:
+    """Pull the next attempt forward; the regular interval can be weeks away."""
+    retry_at = (datetime.now(timezone.utc) + timedelta(hours=MIRROR_RETRY_HOURS)).isoformat()
+    connection.execute(
+        "UPDATE mirror_targets SET next_run_at=? WHERE id=? AND next_run_at>?",
+        (retry_at, target_id, retry_at),
+    )
+
+
 def finish_mirror_run(
     run_id: int, target_id: int, status: str, *, exit_code: int | None,
     summary: str, output: str, transferred: int | None = None,
@@ -1696,6 +1722,8 @@ def finish_mirror_run(
             "UPDATE mirror_targets SET last_status=?,last_run_at=?,last_message=? WHERE id=?",
             (status, now_iso(), summary[:1000], target_id),
         )
+        if status != "success":
+            schedule_mirror_retry(connection, target_id)
         connection.execute(
             "DELETE FROM mirror_runs WHERE target_id=? AND id IN "
             "(SELECT id FROM mirror_runs WHERE target_id=? ORDER BY id DESC LIMIT -1 OFFSET 50)",
@@ -2059,9 +2087,46 @@ def checker_loop() -> None:
         CHECKER_WAKEUP.clear()
 
 
+def close_dead_run(connection: sqlite3.Connection, client_id: int, message: str) -> None:
+    """Release a host whose agent ended a run without reporting its outcome.
+
+    The scheduler and the manual trigger refuse a host with an open run, so an
+    agent killed mid-run would otherwise block that host for good.
+    """
+    closed = connection.execute(
+        "UPDATE backup_commands SET status='failure',finished_at=?,message=? WHERE client_id=? AND status='running'",
+        (now_iso(), message, client_id),
+    ).rowcount
+    closed += connection.execute(
+        "UPDATE clients SET last_event='failure',last_event_at=? WHERE id=? AND last_event='started'",
+        (now_iso(), client_id),
+    ).rowcount
+    if closed:
+        connection.execute(
+            "INSERT INTO status_events(client_id,event,run_id,payload,created_at) VALUES(?, 'failure', NULL, ?, ?)",
+            (client_id, json.dumps({"error": message}, ensure_ascii=False), now_iso()),
+        )
+
+
+def release_silent_agents() -> None:
+    """Close runs of agents that vanished; a late report still overrides the result."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=SILENT_AGENT_HOURS)).isoformat()
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT c.id FROM clients c WHERE (c.last_event='started' AND c.last_event_at<?) OR EXISTS "
+            "(SELECT 1 FROM backup_commands bc WHERE bc.client_id=c.id AND bc.status='running' AND bc.started_at<?)",
+            (cutoff, cutoff),
+        ).fetchall()
+        for row in rows:
+            close_dead_run(
+                connection, row["id"], f"Agent hat sich seit {SILENT_AGENT_HOURS} Stunden nicht gemeldet"
+            )
+
+
 def scheduler_loop() -> None:
     while not SCHEDULER_STOP.wait(30):
         try:
+            release_silent_agents()
             enqueue_due_schedules()
         except Exception:
             LOG.exception("Zentraler Backup-Scheduler fehlgeschlagen")
@@ -2086,11 +2151,22 @@ def startup() -> None:
             "summary='Portal wurde waehrend des Laufs beendet' WHERE status='running'",
             (now_iso(),),
         )
+        interrupted_targets = [
+            row["target_id"]
+            for row in connection.execute("SELECT DISTINCT target_id FROM mirror_runs WHERE status='running'")
+        ]
         connection.execute(
             "UPDATE mirror_runs SET status='interrupted',finished_at=?,summary='Portal wurde waehrend des Laufs beendet' "
             "WHERE status='running'",
             (now_iso(),),
         )
+        for target_id in interrupted_targets:
+            connection.execute(
+                "UPDATE mirror_targets SET last_status='interrupted',last_run_at=?,"
+                "last_message='Portal wurde waehrend des Laufs beendet' WHERE id=?",
+                (now_iso(), target_id),
+            )
+            schedule_mirror_retry(connection, target_id)
     SCHEDULER_STOP.clear()
     SCHEDULER_THREAD = threading.Thread(target=scheduler_loop, name="backup-scheduler", daemon=True)
     SCHEDULER_THREAD.start()
@@ -4765,13 +4841,13 @@ def policy_path_delete(request: Request, policy_id: int, path_id: int, csrf_toke
         deleted = connection.execute(
             "DELETE FROM policy_paths WHERE id=? AND policy_id=?", (path_id, policy_id)
         ).rowcount
+        if not deleted:
+            raise HTTPException(404)
         connection.execute("UPDATE backup_policies SET updated_at=? WHERE id=?", (now_iso(), policy_id))
         connection.execute(
             "UPDATE clients SET agent_config_version=agent_config_version+1,agent_config_updated_at=? WHERE policy_id=?",
             (now_iso(), policy_id),
         )
-    if not deleted:
-        raise HTTPException(404)
     audit(request, "policy.path_delete", str(policy_id), f"path_id={path_id}", user_id=user["id"])
     return RedirectResponse(f"/policies/{policy_id}", status_code=303)
 
@@ -5369,7 +5445,7 @@ def build_agent_config(client: sqlite3.Row, source_hostname: str, has_mariadb: b
     mail_on_success = bool(policy["mail_on_success"]) and bool(smtp["enabled"])
     mail_on_failure = bool(policy["mail_on_failure"]) and bool(smtp["enabled"])
     mail_on_skipped = bool(policy["mail_on_skipped"]) and bool(smtp["enabled"])
-    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{onboarding['fqdn']}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\npostgresql_databases_enabled = {str(bool(policy['postgresql_databases_enabled'])).lower()}\npostgresql_roles_enabled = {str(bool(policy['postgresql_roles_enabled'])).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\nstate_path = "/var/lib/raven-backup/agent-{client['slug']}.json"\n{empty_sources_config}\n{path_config}\n[schedule]\nhour = {int(policy['schedule_hour'])}\nminute = {int(policy['schedule_minute'])}\ninterval_hours = {int(policy['interval_hours'])}\n\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\nmail_on_skipped = {str(mail_on_skipped).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = "{smtp['username']}"\npassword = "{smtp['password']}"\nfrom_address = "{smtp['from_address']}"\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
+    return f'''[backup]\nssh_target = "{alias}"\nexpected_source_hostname = "{source_hostname}"\nexpected_ssh_hostname = "{onboarding['fqdn']}"\nexpected_ssh_user = "{client['username']}"\nexpected_ssh_port = {int(onboarding['backup_ssh_port'])}\nexpected_remote_hostname = "{onboarding['remote_hostname']}"\nexpected_remote_home = "{client['home_path']}"\npolicy_id = {int(policy['id'])}\npolicy_name = {json.dumps(policy['name'])}\nconfig_version = {int(client['agent_config_version'])}\nmariadb_available = {str(has_mariadb).lower()}\nmariadb_enabled = {str(mariadb_databases or mariadb_users).lower()}\nmariadb_databases_enabled = {str(mariadb_databases).lower()}\nmariadb_users_enabled = {str(mariadb_users).lower()}\npostgresql_databases_enabled = {str(bool(policy['postgresql_databases_enabled'])).lower()}\npostgresql_roles_enabled = {str(bool(policy['postgresql_roles_enabled'])).lower()}\nmin_remote_free_bytes = {int(onboarding['min_remote_free_bytes'])}\ndatabase_split_threshold_bytes = {int(onboarding['database_split_threshold_bytes'])}\nstream_attempts = 2\nrsync_attempts = 3\nzstd_level = 3\nssh_control_path = "/run/raven-backup-ssh-%C"\nlocal_lock_path = "/run/raven-backup-agent-{client['slug']}.lock"\nstate_path = "/var/lib/raven-backup/agent-{client['slug']}.json"\n{empty_sources_config}\n{path_config}\n[schedule]\nhour = {int(policy['schedule_hour'])}\nminute = {int(policy['schedule_minute'])}\ninterval_hours = {int(policy['interval_hours'])}\n\n[notifications]\nmail_on_success = {str(mail_on_success).lower()}\nmail_on_failure = {str(mail_on_failure).lower()}\nmail_on_skipped = {str(mail_on_skipped).lower()}\n\n[logging]\nlevel = {json.dumps(client['agent_log_level'])}\nlocal_enabled = {str(bool(client['agent_log_local'])).lower()}\nportal_enabled = {str(bool(client['agent_log_portal'])).lower()}\ninclude_traceback = {str(bool(client['agent_log_traceback'])).lower()}\nportal_max_bytes = {int(client['agent_log_max_bytes'])}\n\n[status]\nenabled = true\nendpoint = "{portal_url}/api/agent/status"\npoll_endpoint = "{portal_url}/api/agent/poll"\ncommand_endpoint = "{portal_url}/api/agent/commands"\nlog_endpoint = "{portal_url}/api/agent/logs"\ntoken = "{agent_token}"\ntimeout_seconds = 15\n\n[smtp]\nhost = "{smtp['host']}"\nport = {int(smtp['port'])}\nusername = {json.dumps(smtp['username'])}\npassword = {json.dumps(smtp['password'])}\nfrom_address = {json.dumps(smtp['from_address'])}\nto = {to_addresses}\nstarttls = false\ntimeout_seconds = {int(smtp.get('timeout_seconds', 20))}\n'''
 
 
 @app.post("/api/onboard/register")
@@ -5476,6 +5552,9 @@ async def agent_poll(request: Request):
             "reported_hostname=NULL,reported_hostname_at=NULL WHERE id=?",
             (now_iso(), reported_mariadb, reported_script_sha256, client["id"]),
         )
+        # The agent polls only while it holds its run lock, so nothing of this
+        # host can still be running when a poll arrives.
+        close_dead_run(connection, client["id"], "Agent hat den Lauf ohne Abschlussmeldung beendet")
         connection.execute(
             "UPDATE backup_commands SET status='queued',claimed_at=NULL,message='Claim timeout; erneut freigegeben' "
             "WHERE client_id=? AND status='claimed' AND claimed_at<?",

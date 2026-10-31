@@ -14,6 +14,7 @@ import os
 import pwd
 import re
 import shlex
+import signal
 import smtplib
 import socket
 import subprocess
@@ -44,6 +45,7 @@ CURRENT_COMMAND_ID: int | None = None
 ATTEMPT_STARTED_AT: str | None = None
 LOG_UPLOAD_ID = uuid.uuid4().hex
 RUN_CONTENT_HASHES: dict[str, str] = {}
+STREAM_TIMEOUT_SECONDS = 43200
 PORTAL_LOG_HANDLER: "BoundedLogHandler | None" = None
 
 
@@ -727,6 +729,27 @@ def producer_shell(producer: list[str], tolerated_exit_codes: frozenset[int]) ->
     )
 
 
+def run_pipeline(pipeline: str, timeout: int = STREAM_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+    """Run one shell pipeline; a stalled one dies as a whole so it releases the run lock."""
+    process = subprocess.Popen(
+        ["/usr/bin/bash", "-o", "pipefail", "-c", pipeline],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate()
+        return subprocess.CompletedProcess(
+            process.args, 124, stdout, f"{stderr}\nZeitlimit von {timeout} Sekunden ueberschritten"
+        )
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
 def stream_compressed(
     cfg: dict[str, Any], producer: list[str], remote_file: str, *, attempts: int,
     tolerated_exit_codes: frozenset[int] = frozenset(),
@@ -750,21 +773,17 @@ def stream_compressed(
     )
 
     def attempt() -> None:
-        proc = subprocess.run(
-            ["/usr/bin/bash", "-o", "pipefail", "-c", pipeline],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            errors="replace",
-            check=False,
-        )
+        proc = run_pipeline(pipeline)
         diagnostics = [line for line in (proc.stderr or "").splitlines() if line.strip()]
         if proc.returncode != 0:
-            ssh(
-                cfg,
-                f"rm -f -- {shlex.quote(remote_tmp)} {shlex.quote(remote_file)}",
-                timeout=60,
-            )
+            try:
+                ssh(
+                    cfg,
+                    f"rm -f -- {shlex.quote(remote_tmp)} {shlex.quote(remote_file)}",
+                    timeout=60,
+                )
+            except Exception as exc:
+                LOG.warning("Teildatei %s konnte nicht entfernt werden: %s", remote_tmp, exc)
             detail = "; ".join(diagnostics[-5:])
             raise RuntimeError(
                 f"Streaming-Pipeline endete mit Status {proc.returncode}" + (f": {detail}" if detail else "")

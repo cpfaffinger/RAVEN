@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
         help="Root-only Fristen je Backup-Benutzer aus dem Portal, abgeleitet aus dem Policy-Intervall",
     )
     parser.add_argument(
+        "--mirrors-json-file",
+        help="Root-only Zustand der Spiegelserver aus dem Portal",
+    )
+    parser.add_argument(
         "--alerts-json-file",
         help="Root-only Mailausloeser des Checkers aus dem Portal",
     )
@@ -316,7 +320,7 @@ def cleanup_backups(
         for root, dirs, files in os.walk(user_home, topdown=True, followlinks=False):
             root_path = Path(root)
             if root_path == user_home:
-                dirs[:] = [name for name in dirs if name not in existing_snapshots]
+                dirs[:] = [name for name in dirs if name not in existing_snapshots and name != "current"]
             visited_dirs.append(root_path)
             for filename in files:
                 if not any(fnmatch.fnmatchcase(filename, pattern) for pattern in legacy_patterns):
@@ -425,6 +429,26 @@ def ssh_activity(since_epoch: float, unit: str) -> dict[str, float]:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             continue
     return latest
+
+
+def mirror_results(mirrors: list[dict[str, Any]], now: datetime) -> list[Result]:
+    """Judge every enabled mirror by its last run and the age of its last success."""
+    results: list[Result] = []
+    for mirror in mirrors:
+        interval_hours = float(mirror.get("interval_hours") or 0)
+        last_success = mirror.get("last_success_at")
+        age_hours = None
+        if last_success:
+            age_hours = (now - datetime.fromisoformat(str(last_success))).total_seconds() / 3600
+        status, detail = "OK", "letzter Lauf erfolgreich"
+        if mirror.get("last_status") in ("failure", "interrupted"):
+            status, detail = "ERROR", f"letzter Lauf fehlgeschlagen: {mirror.get('last_message') or 'unbekannt'}"
+        elif age_hours is not None and age_hours > 2 * interval_hours + 24:
+            status, detail = "ERROR", f"seit {age_hours:.0f} h kein erfolgreicher Lauf"
+        elif not mirror.get("last_status"):
+            detail = "noch kein Lauf"
+        results.append(Result(f"MIRROR_{mirror['name']}", status, "replica", last_success, age_hours, detail))
+    return results
 
 
 def evaluate(cfg: dict[str, Any], previous_state: dict[str, Any] | None = None) -> list[Result]:
@@ -853,6 +877,12 @@ def main() -> int:
         state_path = Path(str(alerts.get("state_file", "/var/lib/backup-check/state.json")))
         state = load_state(state_path)
         results = evaluate(cfg, state)
+        if args.mirrors_json_file:
+            try:
+                mirrors = read_json_override(args.mirrors_json_file, "Spiegel-Override-Datei")
+                results.extend(mirror_results(list(mirrors.get("mirrors", [])), local_now()))
+            except Exception as exc:
+                results.append(Result("MIRROR_CHECK", "ERROR", "replica", None, None, str(exc)))
         try:
             storage_result = storage_check(cfg)
             if storage_result:

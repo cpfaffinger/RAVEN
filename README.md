@@ -247,6 +247,8 @@ Je Ziel wird eine **Strategie** gewählt:
 
 Beim **neuesten Stand** sucht RAVEN zu Beginn jedes Laufs je Zielkonto den neuesten vollständigen Lauf. Ein Lauf, der gerade noch geschrieben wird, zählt nicht. Fehlt ein Lauf auf dem Spiegel noch, legt RAVEN dort zuerst eine Hardlink-Kopie des vorherigen Stands unter dem neuen Namen an, ohne dessen Erfolgsmarker. Gegen diese Basis überträgt rsync nur, was sich geändert hat. Unveränderte Dumps und Archive gehen also nicht noch einmal über die Leitung, und die Kopie belegt keinen zusätzlichen Platz. Das Löschen des alten Stands und das Einsetzen der neuen Dateien geschieht erst am Ende des Transfers (`--delete-after --delay-updates`). Bricht ein Lauf ab, bleibt der vorherige Stand vollständig erhalten. Hat ein Konto noch gar keinen vollständigen Lauf, bleibt sein Ordner auf dem Spiegel unverändert.
 
+Schlägt ein Lauf fehl oder wird er durch einen Portal-Neustart unterbrochen, versucht RAVEN es nach 12 Stunden erneut, statt bis zum nächsten regulären Termin zu warten. Der Checker meldet einen solchen Lauf wie ein überfälliges Backup, siehe [Benachrichtigungen](#benachrichtigungen).
+
 Bei dieser Strategie setzt RAVEN den Zeitpunkt der Löschung selbst. Aus den rsync-Optionen entfallen dafür `--delete*` und `--inplace`. Schutzregeln für Laufordner und die Aufbewahrung wirken hier nicht.
 
 Repliziert werden ausschließlich die Zielkonten des Backupsystems, also die Ordner unterhalb des Home-Roots, die mit dem konfigurierten Benutzerpräfix beginnen. Alles andere im Home-Root – Freigaben, Handablagen, fremde Benutzerordner – bleibt außen vor. Hat ein früherer Lauf solche Ordner bereits kopiert, bleiben sie auf dem Spiegel unverändert liegen und werden im Laufprotokoll benannt; RAVEN löscht auf einem fremden Server nichts von sich aus.
@@ -324,6 +326,15 @@ Der Checker vergleicht deshalb zwei aufeinanderfolgende Läufe über ihre Finger
 
 Ein unveränderter Inhalt ist dabei kein Fehler. Die verglichene Größe stammt aus dem Quellvolumen, und das ist auf einem ruhigen Server zwischen zwei Läufen regelmäßig identisch – früher hat genau das reihenweise falsche Alarme erzeugt. Wer den Hinweis als Alarm behandeln möchte, aktiviert unter **Checker** die Option **Unveränderten Inhalt als Fehler werten**; sie greift ausschließlich bei zwei vorhandenen, identischen Prüfsummen. Läufe ohne Prüfsumme und Spiegelverzeichnisse lösen nie einen Alarm aus, sondern werden nur als solche ausgewiesen.
 
+## Abgebrochene Läufe
+
+Ein Host mit offenem Lauf bekommt keinen neuen Auftrag. Stirbt ein Agent mitten im Lauf, etwa durch einen Neustart der Quelle, würde das den Host dauerhaft sperren. RAVEN löst das auf zwei Wegen auf:
+
+- Der Agent fragt das Portal nur ab, wenn er die Laufsperre hält. Kommt also eine Abfrage herein, läuft auf diesem Host nichts mehr. Das Portal schließt den offenen Lauf dann als fehlgeschlagen ab.
+- Meldet sich ein Agent 48 Stunden lang gar nicht mehr, schließt das Portal den Lauf ebenfalls. Eine verspätete Meldung des Agenten überschreibt dieses Ergebnis.
+
+Damit ein hängender Transfer die Laufsperre nicht festhält, bricht der Agent jeden einzelnen Stream nach 12 Stunden samt allen Teilprozessen ab.
+
 ## Server aus dem Portal entfernen
 
 Ein Server bleibt in der Übersicht, solange sein Linux-Zielkonto besteht – der Bestandsimport beim Portalstart würde einen gelöschten Eintrag ohnehin wieder anlegen. Wurde das Konto auf dem Zielserver entfernt, meldet die Übersicht **Systemkonto fehlt** und zählt den Eintrag unter **Konto fehlt**. Über **Entfernen** in der Zeile oder den Gefahrenbereich der Serverdetails lässt er sich dann dauerhaft löschen; entfernt werden Eintrag, Aufträge, Ereignisse, Laufprotokolle und Deployment-Tokens.
@@ -352,6 +363,8 @@ Der zentrale Checker richtet sich nach den Einstellungen unter **Checker**:
 | Erinnerungsabstand | Abstand, in dem ein weiterhin bestehendes Problem erneut gemeldet wird | 24 Stunden |
 | Unveränderter Inhalt | Wertet zwei Läufe mit identischer Prüfsumme als Problem | aus |
 
+Auch die Spiegelserver sind Teil dieser Prüfung, und zwar als eigene Einträge `MIRROR_<Name>`. Jeder aktive Spiegel gilt als Problem, wenn sein letzter Lauf fehlgeschlagen oder unterbrochen ist oder wenn der letzte Erfolg länger als das doppelte Intervall plus einen Tag zurückliegt.
+
 Ein Force-Report versendet die Ergebnismail unabhängig von diesen Schaltern, ein Dry-Run versendet nie. Das Portal übergibt die Werte bei jedem Lauf; die Angaben in `backup-check.toml` greifen nur beim direkten Aufruf des Skripts.
 
 ### Updates und Wiederherstellung
@@ -363,5 +376,11 @@ Vorhandene Sicherungen werden nach folgendem Schema abgelegt:
 - `/etc/backup-portal/config.toml.bak.<UTC-Zeitstempel>`
 - `/etc/backup-portal/backup-check.toml.bak.<UTC-Zeitstempel>`
 - `/var/lib/backup-portal/portal.db.bak.<UTC-Zeitstempel>`
+
+Eine laufende Installation lässt sich auch ohne `install.sh` aktualisieren. `deploy/deploy.sh` überträgt den committeten und gepushten Stand, sichert vorher Programmdateien und Datenbank, startet den Dienst neu und setzt den vorherigen Stand zurück, falls `/readyz` nicht antwortet. Läuft gerade ein Backup, Spiegel, Checker oder Cleanup, bricht das Skript ab. Von beiden Sicherungen bleiben die letzten fünf erhalten.
+
+```bash
+RAVEN_SSH_TARGET=root@backup.example.com RAVEN_SSH_KEY=~/.ssh/raven deploy/deploy.sh
+```
 
 Bei einem Fehler zuerst `journalctl -u backup-portal` und `/readyz` prüfen. Eine Datenbankwiederherstellung darf nur bei gestopptem Portal erfolgen. Dabei die aktuelle Datenbank zunächst separat sichern, anschließend das gewünschte Zeitstempel-Backup nach `portal.db` kopieren, Eigentümer `root:root` und Modus `0600` setzen und den Dienst wieder starten.

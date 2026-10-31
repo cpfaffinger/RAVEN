@@ -1,6 +1,8 @@
+import os
 import shutil
 import subprocess
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -48,6 +50,20 @@ class ProducerShellTests(unittest.TestCase):
         proc = self.run_pipeline(["printf", "%s|", "a b", "c;d"], frozenset({1}))
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, "a b|c;d|")
+
+
+@unittest.skipUnless(Path("/usr/bin/bash").exists() and hasattr(os, "killpg"), "a POSIX bash is required")
+class RunPipelineTests(unittest.TestCase):
+    def test_output_and_status_are_passed_through(self):
+        proc = backup_job.run_pipeline("echo out; echo err >&2; exit 3")
+        self.assertEqual((proc.returncode, proc.stdout.strip(), proc.stderr.strip()), (3, "out", "err"))
+
+    def test_a_stalled_pipeline_dies_with_all_its_stages(self):
+        started = time.monotonic()
+        proc = backup_job.run_pipeline("sleep 30 | sleep 30", timeout=1)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(proc.returncode, 124)
+        self.assertIn("Zeitlimit", proc.stderr)
 
 
 if __name__ == "__main__":
