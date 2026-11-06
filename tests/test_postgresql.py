@@ -46,6 +46,57 @@ class CommandTests(unittest.TestCase):
         )
 
 
+def completed(returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
+
+
+class DiscoveryTests(unittest.TestCase):
+    """Instances are found per host, so one policy fits hosts with and without PostgreSQL."""
+
+    def discover(self, containers, servers, queries):
+        def fake_query(instance, sql):
+            outcome = queries[instance["container"]]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return [["17.1"]] if "version" in sql else [[""]]
+
+        with mock.patch.object(backup_job, "POSTGRES_SOCKET_DIR", Path(tempfile.gettempdir()) / "no-such-socket-dir"), \
+                mock.patch.object(backup_job, "docker_postgres_containers", return_value=containers), \
+                mock.patch.object(backup_job, "docker_container_runs_postgres", side_effect=lambda c: c in servers), \
+                mock.patch.object(backup_job, "run", return_value=completed()), \
+                mock.patch.object(backup_job, "postgres_query", fake_query):
+            return backup_job.postgres_instances()
+
+    def test_host_without_postgresql_has_nothing_to_back_up(self):
+        self.assertEqual(self.discover([], set(), {}), ([], []))
+
+    def test_helper_container_built_on_the_server_image_is_not_an_instance(self):
+        instances, skipped = self.discover(
+            ["chargeglobe-backup-1", "chargeglobe-db-1"],
+            {"chargeglobe-db-1"},
+            {"chargeglobe-db-1": None, "chargeglobe-backup-1": RuntimeError("must not be asked")},
+        )
+        self.assertEqual([item["container"] for item in instances], ["chargeglobe-db-1"])
+        self.assertEqual(skipped, [])
+
+    def test_unreachable_server_is_skipped_and_reported_instead_of_failing_the_run(self):
+        error = RuntimeError('Befehl fehlgeschlagen (2): psql\npsql: error: password authentication failed')
+        instances, skipped = self.discover(
+            ["locked-db", "open-db"], {"locked-db", "open-db"}, {"locked-db": error, "open-db": None},
+        )
+        self.assertEqual([item["container"] for item in instances], ["open-db"])
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["instance"], "Docker-Container locked-db")
+        self.assertIn("password authentication failed", skipped[0]["reason"])
+
+    def test_server_probe_asks_for_a_postgres_process(self):
+        with mock.patch.object(backup_job, "run", return_value=completed(1)) as run:
+            self.assertFalse(backup_job.docker_container_runs_postgres("helper"))
+        self.assertIn("/proc/", run.call_args.args[0][-1])
+        with mock.patch.object(backup_job, "run", return_value=completed(0)):
+            self.assertTrue(backup_job.docker_container_runs_postgres("db"))
+
+
 class DataDirectoryTests(unittest.TestCase):
     def test_container_path_maps_to_the_longest_bind_mount(self):
         mounts = "/home/postgres\t/srv/other\n/home/postgres/pgdata\t/etc/compose/data/postgres\n"

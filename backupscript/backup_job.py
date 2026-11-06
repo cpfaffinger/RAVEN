@@ -328,7 +328,7 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
     version = mariadb_query("SELECT VERSION()") if mariadb_enabled else [["deaktiviert"]]
     if mariadb_enabled and not version:
         raise RuntimeError("lokale MariaDB ist nicht per Unix-Socket erreichbar")
-    postgres = postgres_instances() if postgresql_enabled else []
+    postgres, postgres_skipped = postgres_instances() if postgresql_enabled else ([], [])
     excluded_paths = dumped_data_directories(cfg, postgres)
     source_estimated_bytes = 0
     for item in configured_backup_paths(cfg):
@@ -379,6 +379,7 @@ def preflight(cfg: dict[str, Any]) -> dict[str, Any]:
         "mariadb_databases_enabled": mariadb_databases_enabled,
         "mariadb_users_enabled": mariadb_users_enabled,
         "postgresql_instances": postgres,
+        "postgresql_skipped": postgres_skipped,
     }
 
 
@@ -1005,14 +1006,30 @@ def docker_postgres_containers() -> list[str]:
     return found
 
 
-def postgres_instances() -> list[dict[str, Any]]:
+def docker_container_runs_postgres(container: str) -> bool:
+    """Tell a running server from a container that only carries PostgreSQL tooling.
+
+    Backup helpers such as pgbackrest or pg_dump cron images are built on the
+    server image and inherit its environment, but they talk to a server in
+    another container. Only a container with a postgres process is one.
+    """
+    probe = run(
+        ["/usr/bin/docker", "exec", container, "sh", "-c", "grep -lx postgres /proc/[0-9]*/comm >/dev/null 2>&1"],
+        capture=True, timeout=60, check=False,
+    )
+    return probe.returncode == 0
+
+
+def postgres_instances() -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Find the PostgreSQL servers on this host: the local cluster and containers.
 
-    An instance that is clearly present but refuses the connection fails the
-    backup, the same way an unreachable MariaDB does; silently leaving a
-    database out would look like a complete backup.
+    Whatever is not found is not backed up, so a host without PostgreSQL needs
+    no special policy. A server that is running but refuses the connection is
+    returned as skipped with its reason instead of failing the run: the files
+    of the host are still worth saving, and the skip is reported by mail.
     """
     instances: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
     runuser = next((path for path in ("/usr/sbin/runuser", "/sbin/runuser") if Path(path).exists()), None)
     has_socket = POSTGRES_SOCKET_DIR.is_dir() and any(POSTGRES_SOCKET_DIR.glob(".s.PGSQL.*"))
     if has_socket and runuser and Path("/usr/bin/pg_dump").exists():
@@ -1022,6 +1039,9 @@ def postgres_instances() -> list[dict[str, Any]]:
         except KeyError:
             LOG.warning("PostgreSQL-Socket vorhanden, aber kein Systembenutzer postgres; lokaler Cluster wird uebersprungen")
     for container in docker_postgres_containers():
+        if not docker_container_runs_postgres(container):
+            LOG.info("Container %s enthaelt PostgreSQL-Werkzeuge, fuehrt aber keinen Server aus; uebersprungen", container)
+            continue
         probe = run(
             ["/usr/bin/docker", "exec", container, "sh", "-c", "command -v pg_dump && command -v pg_dumpall"],
             capture=True, timeout=60, check=False,
@@ -1035,18 +1055,23 @@ def postgres_instances() -> list[dict[str, Any]]:
             "container": container,
             "label": f"Docker-Container {container}",
         })
+    reachable: list[dict[str, Any]] = []
     for instance in instances:
         try:
             version = postgres_query(instance, "SHOW server_version")
             data_directory = postgres_query(instance, "SHOW data_directory")
         except RuntimeError as exc:
-            raise RuntimeError(f"PostgreSQL {instance['label']} ist nicht erreichbar: {exc}") from exc
+            reason = str(exc).splitlines()[-1][:300] if str(exc) else "unbekannter Fehler"
+            LOG.warning("PostgreSQL %s ist nicht erreichbar und wird nicht gesichert: %s", instance["label"], reason)
+            skipped.append({"instance": instance["label"], "reason": reason})
+            continue
         instance["version"] = version[0][0] if version else "unbekannt"
         directory = data_directory[0][0] if data_directory else ""
         instance["data_directory"] = (
             docker_host_path(instance["container"], directory) if instance["kind"] == "docker" else directory
         ) or None
-    return instances
+        reachable.append(instance)
+    return reachable, skipped
 
 
 def docker_host_path(container: str, path: str) -> str | None:
@@ -1373,6 +1398,30 @@ def notify_skipped(cfg: dict[str, Any], reason: str) -> None:
         LOG.exception("Mail ueber den uebersprungenen Lauf konnte nicht gesendet werden")
 
 
+def describe_skipped_postgres(skipped: list[dict[str, str]]) -> str:
+    return "; ".join(f"{item['instance']}: {item['reason']}" for item in skipped)
+
+
+def notify_degraded(cfg: dict[str, Any], run_id: str, skipped: list[dict[str, str]]) -> None:
+    """Warn by mail that a finished backup left PostgreSQL servers out."""
+    if not skipped or not notifications_enabled(cfg, "failure"):
+        return
+    try:
+        send_mail(
+            cfg,
+            f"[Backup-WARNUNG] {socket.getfqdn()} {run_id}",
+            "Backup ohne PostgreSQL-Instanzen",
+            "Das Backup ist abgeschlossen, einzelne PostgreSQL-Server waren aber nicht erreichbar "
+            "und sind darin nicht enthalten.\n"
+            f"Quelle: {socket.getfqdn()}\nBackup-ID: {run_id}\n{describe_skipped_postgres(skipped)}",
+            success=False,
+            report_rows=[("Status", "Mit Warnung abgeschlossen"), ("Backup-ID", run_id)]
+            + [(f"Nicht gesichert: {item['instance']}", item["reason"]) for item in skipped],
+        )
+    except Exception:
+        LOG.exception("Warnmail ueber ausgelassene PostgreSQL-Instanzen konnte nicht gesendet werden")
+
+
 def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, Any]:
     global CURRENT_PHASE, CURRENT_RUN_ID
     backup = cfg["backup"]
@@ -1420,6 +1469,7 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
         }
     CURRENT_PHASE = "postgresql"
     pg_report = backup_postgresql(cfg, run_dir, preflight_result["postgresql_instances"])
+    pg_report["skipped_instances"] = preflight_result["postgresql_skipped"]
     CURRENT_PHASE = "filesystem"
     fs_report = backup_filesystems(
         cfg, remote_home, run_dir, previous,
@@ -1520,6 +1570,7 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
         format_size(run_bytes),
     )
 
+    notify_degraded(cfg, run_id, pg_report["skipped_instances"])
     notify_success = notifications_enabled(cfg, "success") or force_success_mail
     if notify_success:
         users_size = classifications["mariadb_users"]["compressed_bytes"]
@@ -1573,6 +1624,8 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
             ),
             ("Vorheriges Backup", previous or "keines"),
         ])
+        if pg_report["skipped_instances"]:
+            rows.append(("PostgreSQL nicht gesichert", describe_skipped_postgres(pg_report["skipped_instances"])))
         try:
             send_mail(
                 cfg,
