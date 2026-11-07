@@ -135,6 +135,7 @@ def apply_command_policy(cfg: dict[str, Any], command: dict[str, Any]) -> None:
     cfg["backup"]["mariadb_enabled"] = databases_enabled or users_enabled
     cfg["backup"]["postgresql_databases_enabled"] = bool(policy.get("postgresql_databases_enabled", False))
     cfg["backup"]["postgresql_roles_enabled"] = bool(policy.get("postgresql_roles_enabled", False))
+    cfg["backup"]["crontab_enabled"] = bool(policy.get("crontab_enabled", True))
 
 
 class BoundedLogHandler(logging.Handler):
@@ -641,6 +642,7 @@ def compact_portal_report(report: dict[str, Any] | None, error: BaseException | 
             "filesystem": report.get("filesystem"),
             "mariadb": mariadb,
             "postgresql": postgresql,
+            "crontab": report.get("crontab"),
         }
     if error:
         return {
@@ -1183,6 +1185,50 @@ def backup_postgresql(
     return report
 
 
+def backup_crontab(cfg: dict[str, Any], run_dir: str) -> dict[str, Any]:
+    """Save the crontab of root, the one `crontab -e` edits and `crontab -l` prints.
+
+    A host without cron or without a root crontab has nothing to save, which is
+    reported but does not fail the run: the policy is shared by all hosts.
+    """
+    enabled = bool(cfg["backup"].get("crontab_enabled", True))
+    report: dict[str, Any] = {
+        "enabled": enabled,
+        "available": False,
+        "present": False,
+        "entry_count": 0,
+        "compressed_bytes": 0,
+    }
+    if not enabled:
+        return report
+    if not command_exists("crontab"):
+        LOG.warning("Root-Crontab nicht gesichert: crontab ist auf diesem Host nicht installiert")
+        return report
+    report["available"] = True
+    listing = run(["crontab", "-u", "root", "-l"], capture=True, timeout=60, check=False)
+    if listing.returncode != 0:
+        if listing.returncode == 1 and "no crontab" in (listing.stderr or "").lower():
+            LOG.info("Root hat keine Crontab; nichts zu sichern")
+            return report
+        raise RuntimeError(
+            f"crontab -u root -l fehlgeschlagen ({listing.returncode}): {(listing.stderr or '').strip()[:300]}"
+        )
+    report["present"] = True
+    report["entry_count"] = sum(
+        1 for line in listing.stdout.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+    destination = f"{run_dir}/system/root-crontab.txt.zst"
+    LOG.info("Root-Crontab: %d Eintraege", report["entry_count"])
+    stream_compressed(
+        cfg,
+        ["crontab", "-u", "root", "-l"],
+        destination,
+        attempts=int(cfg["backup"].get("stream_attempts", 2)),
+    )
+    report["compressed_bytes"] = remote_file_size(cfg, destination)
+    return report
+
+
 def find_previous_backup(cfg: dict[str, Any], remote_home: str) -> str | None:
     command = (
         f"find {shlex.quote(remote_home)} -mindepth 2 -maxdepth 2 -type f -name .backup-ok "
@@ -1470,6 +1516,8 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
     CURRENT_PHASE = "postgresql"
     pg_report = backup_postgresql(cfg, run_dir, preflight_result["postgresql_instances"])
     pg_report["skipped_instances"] = preflight_result["postgresql_skipped"]
+    CURRENT_PHASE = "crontab"
+    crontab_report = backup_crontab(cfg, run_dir)
     CURRENT_PHASE = "filesystem"
     fs_report = backup_filesystems(
         cfg, remote_home, run_dir, previous,
@@ -1530,6 +1578,13 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
             "compressed_bytes": pg_report["data_compressed_bytes"],
             "file_count": pg_report["database_count"],
         },
+        "root_crontab": {
+            "label": "Root-Crontab",
+            "kind": "crontab",
+            "enabled": crontab_report["enabled"],
+            "compressed_bytes": crontab_report["compressed_bytes"],
+            "entry_count": crontab_report["entry_count"],
+        },
     })
     report = {
         "status": "ok",
@@ -1553,6 +1608,7 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
         },
         "mariadb": db_report,
         "postgresql": pg_report,
+        "crontab": crontab_report,
         "filesystem": fs_report,
         "classifications": classifications,
     }
@@ -1621,6 +1677,14 @@ def execute_backup(cfg: dict[str, Any], force_success_mail: bool) -> dict[str, A
                 (f"{pg_report['database_count']} Datenbanken in {pg_report['instance_count']} Instanzen, "
                  f"{format_size(pg_report['compressed_bytes'])} komprimiert"
                  if pg_report["databases_enabled"] or pg_report["roles_enabled"] else "durch Policy deaktiviert"),
+            ),
+            (
+                "Root-Crontab",
+                (f"{crontab_report['entry_count']} Eintraege, {format_size(crontab_report['compressed_bytes'])} komprimiert"
+                 if crontab_report["present"]
+                 else "keine Crontab vorhanden" if crontab_report["available"]
+                 else "crontab nicht installiert" if crontab_report["enabled"]
+                 else "durch Policy deaktiviert"),
             ),
             ("Vorheriges Backup", previous or "keines"),
         ])

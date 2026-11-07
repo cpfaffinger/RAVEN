@@ -583,6 +583,10 @@ def init_db() -> None:
                 "ALTER TABLE backup_policies ADD COLUMN postgresql_roles_enabled INTEGER NOT NULL DEFAULT 1"
             )
             connection.execute("UPDATE backup_policies SET postgresql_roles_enabled=mariadb_users_enabled")
+        # The root crontab is small and host-independent, so every existing
+        # policy starts with it enabled (the column default).
+        if "crontab_enabled" not in policy_columns:
+            connection.execute("ALTER TABLE backup_policies ADD COLUMN crontab_enabled INTEGER NOT NULL DEFAULT 1")
         migrate_policy_schedule(connection, policy_columns, client_columns, portal_defaults)
         migrate_policy_notifications(connection, policy_columns, client_columns)
         cleanup_defaults = checker_cleanup_configuration()

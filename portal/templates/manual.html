@@ -165,6 +165,9 @@ zstd -dc data.sql.zst | mariadb zieldatenbank</code></pre>
       <pre><code>zstd -dc globals.sql.zst | psql -U postgres
 createdb -U postgres zieldatenbank
 zstd -dc databases/app.sql.zst | psql -U postgres -d zieldatenbank</code></pre>
+      <h3>Root-Crontab</h3><ol><li>Unter <code>system/root-crontab.txt.zst</code> liegt die Ausgabe von <code>crontab -l</code> des Benutzers root; fehlt die Datei, hatte der Host keine Crontab.</li><li>Prüfen und als Crontab von root einspielen.</li></ol>
+      <pre><code>zstd -dc system/root-crontab.txt.zst
+zstd -dc system/root-crontab.txt.zst | crontab -u root -</code></pre>
       <p>Vor einem Restore in eine bestehende Datenbank immer ein zusätzliches aktuelles Sicherungsabbild erstellen.</p>
     </section>
 

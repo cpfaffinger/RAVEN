@@ -150,6 +150,7 @@ class AgentTestCase(unittest.TestCase):
                 "expected_remote_home": REMOTE_HOME,
                 "min_remote_free_bytes": 0,
                 "mariadb_enabled": False,
+                "crontab_enabled": False,
                 "sources": [str(self.source)],
                 "state_path": str(self.state_path),
                 "local_lock_path": str(self.root / "agent.lock"),
@@ -301,6 +302,16 @@ class PollTests(AgentTestCase):
         self.assertEqual(marker["policy"]["id"], 3)
         self.assertEqual(list(marker["filesystem"]["sources"]), [str(other)])
         self.assertIn("filesystem/web.tar.zst", marker["content_hashes"])
+
+    def test_the_root_crontab_is_part_of_a_run_when_the_policy_asks_for_it(self):
+        self.cfg["backup"]["crontab_enabled"] = True
+        self.portal.poll_answer = backup_command()
+        self.assertEqual(self.run_main("--poll"), 0)
+        marker = json.loads(self.host.written[self.host.markers()[0]])
+        self.assertIn("system/root-crontab.txt.zst", marker["content_hashes"])
+        self.assertTrue(marker["crontab"]["present"])
+        self.assertEqual(marker["classifications"]["root_crontab"]["kind"], "crontab")
+        self.assertTrue(any("crontab -u root -l" in pipeline for pipeline in self.host.pipelines))
 
     def test_not_due_without_force_posts_skipped(self):
         self.remember_recent_success()

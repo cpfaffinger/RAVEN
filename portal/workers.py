@@ -74,6 +74,7 @@ def policy_payload(connection: sqlite3.Connection, policy_id: int | None) -> dic
         "mariadb_users_enabled": bool(policy["mariadb_users_enabled"]),
         "postgresql_databases_enabled": bool(policy["postgresql_databases_enabled"]),
         "postgresql_roles_enabled": bool(policy["postgresql_roles_enabled"]),
+        "crontab_enabled": bool(policy["crontab_enabled"]),
         "schedule_hour": int(policy["schedule_hour"]),
         "schedule_minute": int(policy["schedule_minute"]),
         "interval_hours": int(policy["interval_hours"]),

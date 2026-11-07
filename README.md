@@ -297,6 +297,10 @@ Jeder Benutzer kann unter **Konto & Passkeys** beliebig viele Passkeys (bis zu 2
 
 Ein Passkey ist an den Portal-FQDN als Relying Party und an den exakten Ursprung samt HTTPS-Port gebunden. Nach einem Domainwechsel müssen Passkeys daher neu registriert werden. Das Portal speichert nur den öffentlichen Schlüssel und einen Signaturzähler; ein Zähler, der bei einem Gerät mit eigenem Zähler nicht steigt, deutet auf einen kopierten Schlüssel und führt zur Ablehnung. Attestierungen werden bewusst nicht ausgewertet (`attestation: none`), weil sich nur ein bereits angemeldeter Benutzer einen Passkey hinzufügen kann. Die Prüfung steckt in `portal/webauthn.py` und benötigt außer `cryptography` keine weitere Bibliothek.
 
+## Root-Crontab
+
+Jede Policy kann zusätzlich die Crontab von root sichern (`crontab -u root -l`, also das, was `crontab -e` bearbeitet); die Option ist für alle bestehenden Policies aktiv und lässt sich in der Policy abschalten. Sie landet als `system/root-crontab.txt.zst` im Lauf. Hosts ohne installiertes `crontab` oder ohne Crontab für root werden nicht als Fehler behandelt; der Bericht (`crontab.available`, `crontab.present`) und die Erfolgsmail halten das fest. Wiederherstellen: `zstd -dc system/root-crontab.txt.zst | crontab -u root -`.
+
 ## PostgreSQL
 
 Policies sichern neben MariaDB auch PostgreSQL, getrennt nach **Datenbanken** und **Rollen und Rechte**; beides ist für bestehende Policies aktiv. Der Agent sucht bei jedem Lauf selbst nach Instanzen:

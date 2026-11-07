@@ -968,6 +968,18 @@ class PolicyUpdateTests(AgentTestCase):
         self.assertIsNotNone(self.client_row()["agent_config_updated_at"])
         self.assertIsNone(self.client_row(self.bystander)["agent_config_updated_at"])
 
+    def test_crontab_backup_is_on_by_default_and_follows_the_form(self):
+        query = "SELECT crontab_enabled FROM backup_policies WHERE id=?"
+        self.assertEqual(self.row(query, self.policy_id)["crontab_enabled"], 1)
+        with closing(core.db()) as connection:
+            self.assertTrue(workers.policy_payload(connection, self.policy_id)["crontab_enabled"])
+        self.admin.submit(f"/policies/{self.policy_id}", **self.FORM)
+        self.assertEqual(self.row(query, self.policy_id)["crontab_enabled"], 0)
+        with closing(core.db()) as connection:
+            self.assertFalse(workers.policy_payload(connection, self.policy_id)["crontab_enabled"])
+        self.admin.submit(f"/policies/{self.policy_id}", **self.FORM, crontab_enabled="on")
+        self.assertEqual(self.row(query, self.policy_id)["crontab_enabled"], 1)
+
     def test_adding_a_path_bumps_its_assigned_clients(self):
         response = self.admin.submit(
             f"/policies/{self.policy_id}/paths", source_path="/srv/data", target_name="data", mode="tar"

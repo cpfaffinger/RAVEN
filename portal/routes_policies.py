@@ -93,6 +93,7 @@ def policy_create(
     mariadb_users_enabled: str | None = Form(None),
     postgresql_databases_enabled: str | None = Form(None),
     postgresql_roles_enabled: str | None = Form(None),
+    crontab_enabled: str | None = Form(None),
     mail_on_success: str | None = Form(None),
     mail_on_failure: str | None = Form(None),
     mail_on_skipped: str | None = Form(None),
@@ -118,14 +119,14 @@ def policy_create(
             users_enabled = bool(mariadb_users_enabled)
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
-                "mariadb_users_enabled,postgresql_databases_enabled,postgresql_roles_enabled,"
+                "mariadb_users_enabled,postgresql_databases_enabled,postgresql_roles_enabled,crontab_enabled,"
                 "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
                 "mail_on_success,mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,"
                 "minimum_snapshots_to_keep,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, bool(postgresql_databases_enabled),
-                 bool(postgresql_roles_enabled), schedule_hour, schedule_minute, interval_hours,
+                 bool(postgresql_roles_enabled), bool(crontab_enabled), schedule_hour, schedule_minute, interval_hours,
                  start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
                  bool(mail_on_skipped), cleanup_enabled_value, retention_days,
                  minimum_snapshots_to_keep, now_iso(), now_iso()),
@@ -189,6 +190,7 @@ def policy_update(
     mariadb_users_enabled: str | None = Form(None),
     postgresql_databases_enabled: str | None = Form(None),
     postgresql_roles_enabled: str | None = Form(None),
+    crontab_enabled: str | None = Form(None),
     mail_on_success: str | None = Form(None),
     mail_on_failure: str | None = Form(None),
     mail_on_skipped: str | None = Form(None),
@@ -217,13 +219,13 @@ def policy_update(
             connection.execute(
                 "UPDATE backup_policies SET name=?,description=?,mariadb_enabled=?,"
                 "mariadb_databases_enabled=?,mariadb_users_enabled=?,postgresql_databases_enabled=?,"
-                "postgresql_roles_enabled=?,schedule_hour=?,schedule_minute=?,"
+                "postgresql_roles_enabled=?,crontab_enabled=?,schedule_hour=?,schedule_minute=?,"
                 "interval_hours=?,start_offset_minutes=?,mail_on_success=?,mail_on_failure=?,"
                 "mail_on_skipped=?,cleanup_enabled=?,retention_days=?,minimum_snapshots_to_keep=?,"
                 "updated_at=? WHERE id=?",
                 (name, description.strip()[:1000], databases_enabled or users_enabled,
                  databases_enabled, users_enabled, bool(postgresql_databases_enabled),
-                 bool(postgresql_roles_enabled), schedule_hour, schedule_minute, interval_hours,
+                 bool(postgresql_roles_enabled), bool(crontab_enabled), schedule_hour, schedule_minute, interval_hours,
                  start_offset_minutes, bool(mail_on_success), bool(mail_on_failure),
                  bool(mail_on_skipped), cleanup_enabled_value, retention_days,
                  minimum_snapshots_to_keep, now_iso(), policy_id),
@@ -277,12 +279,12 @@ def policy_duplicate(
                 raise HTTPException(400, f"Policy-Name muss 3 bis {POLICY_NAME_MAX} Zeichen lang sein")
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,mariadb_databases_enabled,"
-                "mariadb_users_enabled,postgresql_databases_enabled,postgresql_roles_enabled,"
+                "mariadb_users_enabled,postgresql_databases_enabled,postgresql_roles_enabled,crontab_enabled,"
                 "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,"
                 "mail_on_success,mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,"
                 "minimum_snapshots_to_keep,active,created_at,updated_at) "
                 "SELECT ?,description,mariadb_enabled,mariadb_databases_enabled,mariadb_users_enabled,"
-                "postgresql_databases_enabled,postgresql_roles_enabled,"
+                "postgresql_databases_enabled,postgresql_roles_enabled,crontab_enabled,"
                 "schedule_hour,schedule_minute,interval_hours,start_offset_minutes,mail_on_success,"
                 "mail_on_failure,mail_on_skipped,cleanup_enabled,retention_days,minimum_snapshots_to_keep,"
                 "active,?,? FROM backup_policies WHERE id=?",

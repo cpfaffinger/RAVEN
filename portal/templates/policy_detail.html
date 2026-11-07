@@ -35,6 +35,10 @@
       <div><p class="eyebrow">PostgreSQL</p><h2>PostgreSQL-Sicherung</h2><p class="muted">Der Agent findet lokale Cluster und PostgreSQL-Container unter Docker selbst; Server ohne PostgreSQL bleiben unberührt.</p></div>
       <div class="checks"><label><input type="checkbox" name="postgresql_databases_enabled" {% if policy.postgresql_databases_enabled %}checked{% endif %}> Datenbanken sichern <small>Konsistenter <code>pg_dump</code> jeder Datenbank als SQL, je Instanz getrennt</small></label><label><input type="checkbox" name="postgresql_roles_enabled" {% if policy.postgresql_roles_enabled %}checked{% endif %}> Rollen und Rechte sichern <small>Rollen, Mitgliedschaften und Tablespaces per <code>pg_dumpall --globals-only</code></small></label></div>
     </div>
+    <div class="form-block">
+      <div><p class="eyebrow">System</p><h2>Root-Crontab</h2><p class="muted">Hosts ohne cron oder ohne Crontab für root bleiben unberührt.</p></div>
+      <div class="checks"><label><input type="checkbox" name="crontab_enabled" {% if policy.crontab_enabled %}checked{% endif %}> Crontab von root sichern <small>Ausgabe von <code>crontab -l</code> (wie in <code>crontab -e</code> bearbeitet) als <code>system/root-crontab.txt.zst</code></small></label></div>
+    </div>
     <div class="actions"><button class="primary">Policy speichern</button></div>
   </form>
 </section>
