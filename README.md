@@ -381,7 +381,7 @@ Vorhandene Sicherungen werden nach folgendem Schema abgelegt:
 - `/etc/backup-portal/backup-check.toml.bak.<UTC-Zeitstempel>`
 - `/var/lib/backup-portal/portal.db.bak.<UTC-Zeitstempel>`
 
-Eine laufende Installation lässt sich auch ohne `install.sh` aktualisieren. `deploy/deploy.sh` überträgt den committeten und gepushten Stand, sichert vorher Programmdateien und Datenbank, startet den Dienst neu und setzt den vorherigen Stand zurück, falls `/readyz` nicht antwortet. Läuft gerade ein Backup, Spiegel, Checker oder Cleanup, bricht das Skript ab. Von beiden Sicherungen bleiben die letzten fünf erhalten.
+Eine laufende Installation lässt sich auch ohne `install.sh` aktualisieren. `deploy/deploy.sh` überträgt den committeten und gepushten Stand, sichert vorher Programmdateien und Datenbank, startet den Dienst neu und setzt den vorherigen Stand zurück, falls `/readyz` nicht antwortet. Läuft gerade ein Backup, Spiegel, Checker oder Cleanup, bricht das Skript ab. Von beiden Sicherungen bleiben die letzten fünf erhalten. Jedes Deployment schreibt eine `build.json` neben die Programmdateien: Version aus der Datei `VERSION` (von Hand erhöhen), Buildnummer als Anzahl der Commits auf `master` und den Commit-Hash. Das Portal zeigt sie dezent auf der Anmeldeseite und in der Seitenleiste unter dem Benutzernamen; `/readyz` meldet sie ebenfalls.
 
 ```bash
 RAVEN_SSH_TARGET=root@backup.example.com RAVEN_SSH_KEY=~/.ssh/raven deploy/deploy.sh

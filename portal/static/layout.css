@@ -71,6 +71,8 @@ body.has-sidebar {
 .nav-user { display: grid; gap: 1px; padding: 8px 12px 4px; }
 .nav-user strong { color: #fff; overflow-wrap: anywhere; }
 .nav-user span { color: #7f97a3; font-size: 12px; }
+.nav-user .build-label { margin-top: 6px; color: #5d7683; font-size: 11px; font-variant-numeric: tabular-nums; }
+.login-build { margin: 26px 0 0; text-align: center; color: var(--muted); opacity: .7; font-size: 11px; font-variant-numeric: tabular-nums; }
 
 .nav-toggle {
   display: none;

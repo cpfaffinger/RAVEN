@@ -34,6 +34,33 @@ def asset(path: str) -> str:
 
 templates.env.globals["asset"] = asset
 
+BUILD_FILE = BASE_DIR / "build.json"
+
+
+def load_build_info(path=BUILD_FILE) -> dict[str, str]:
+    """Version and build written by deploy/deploy.sh; empty fields mean an unreleased checkout."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    info = {key: str(raw.get(key) or "") for key in ("version", "build", "commit", "deployed_at")}
+    parts = []
+    if info["version"]:
+        parts.append(f"v{info['version']}")
+    if info["build"]:
+        parts.append(f"Build {info['build']}")
+    if info["commit"]:
+        parts.append(info["commit"])
+    info["label"] = " · ".join(parts) or "Entwicklungsstand"
+    return info
+
+
+# The service restarts on every deploy, so reading the file once is enough.
+BUILD_INFO = load_build_info()
+templates.env.globals["build"] = BUILD_INFO
+
 NAV_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("explorer", ("/explorer",)),
     ("policies", ("/policies",)),

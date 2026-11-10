@@ -54,7 +54,7 @@
     <div class="nav-group nav-footer">
       {{ nav_item('manual', '/manual', 'Handbuch') }}
       {{ nav_item('account', '/account', 'Konto & Passkeys') }}
-      <div class="nav-user"><strong>{{ user.display_name or user.username }}</strong><span>{{ 'Administrator' if user.role == 'admin' else 'Leserecht' }}</span></div>
+      <div class="nav-user"><strong>{{ user.display_name or user.username }}</strong><span>{{ 'Administrator' if user.role == 'admin' else 'Leserecht' }}</span><span class="build-label" title="{{ 'Deployt ' ~ build.deployed_at if build.deployed_at else 'Nicht über deploy.sh ausgeliefert' }}">{{ build.label }}</span></div>
       <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="link-button">Abmelden</button></form>
     </div>
   </nav>

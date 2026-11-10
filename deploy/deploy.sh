@@ -20,11 +20,15 @@ git fetch -q origin
 git merge-base --is-ancestor HEAD origin/master || die "HEAD ist noch nicht auf origin/master"
 
 sha="$(git rev-parse --short HEAD)"
+# The build number is the commit count on master: it grows with every shipped change and
+# can be traced back to the exact commit, so a redeploy of the same commit keeps its number.
+version="$(tr -d '[:space:]' < VERSION)"
+build="$(git rev-list --count HEAD)"
 fqdn="${RAVEN_SSH_TARGET#*@}"
 stage="/tmp/raven-deploy-$sha"
 
-echo "deploy: $sha nach $fqdn"
+echo "deploy: v$version build $build ($sha) nach $fqdn"
 git archive --format=tar HEAD portal backupscript/backup_job.py backup_check.py deploy \
     | ssh "${ssh_args[@]}" "$RAVEN_SSH_TARGET" "rm -rf '$stage' && mkdir -m 0700 '$stage' && tar -xf - -C '$stage'"
 ssh "${ssh_args[@]}" "$RAVEN_SSH_TARGET" \
-    "trap \"rm -rf '$stage'\" EXIT; bash '$stage/deploy/remote-install.sh' '$stage' '$sha' '$fqdn' '$portal_port'"
+    "trap \"rm -rf '$stage'\" EXIT; bash '$stage/deploy/remote-install.sh' '$stage' '$sha' '$fqdn' '$portal_port' '$version' '$build'"

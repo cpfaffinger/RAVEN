@@ -7,6 +7,8 @@ stage="$1"
 sha="$2"
 fqdn="$3"
 portal_port="$4"
+version="$5"
+build="$6"
 app=/opt/backup-portal
 database=/var/lib/backup-portal/portal.db
 backups="$app/.deploy-backups"
@@ -50,6 +52,9 @@ install_tree() {
     install -o root -g root -m 0644 "$source/portal/assets/bootstrap_agent.py" "$app/assets/bootstrap_agent.py"
     install -o root -g root -m 0644 "$source/backupscript/backup_job.py" "$app/assets/backup_job.py"
     install -o root -g root -m 0644 "$source/backup_check.py" "$app/checker/backup_check.py"
+    if [ -f "$source/portal/build.json" ]; then
+        install -o root -g root -m 0644 "$source/portal/build.json" "$app/build.json"
+    fi
     rm -rf "$app/templates" "$app/static"
     cp -a "$source/portal/templates" "$source/portal/static" "$app/"
     chown -R root:root "$app/templates" "$app/static"
@@ -64,6 +69,9 @@ snapshot() {
     cp -a "$app/assets/backup_job.py" "$target/backupscript/"
     cp -a "$app/checker/backup_check.py" "$target/"
     cp -a "$app/templates" "$app/static" "$target/portal/"
+    if [ -f "$app/build.json" ]; then
+        cp -a "$app/build.json" "$target/portal/"
+    fi
 }
 
 active="$(active_runs)"
@@ -83,6 +91,9 @@ source.backup(target)
 PY
 chmod 0600 "$database.pre-$sha"
 
+printf '{"version": "%s", "build": "%s", "commit": "%s", "deployed_at": "%s"}\n' \
+    "$version" "$build" "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$stage/portal/build.json"
+
 cmp -s "$stage/portal/requirements.txt" "$app/requirements.txt" \
     || "$app/venv/bin/pip" install -q -r "$stage/portal/requirements.txt"
 install_tree "$stage"
@@ -100,4 +111,4 @@ fi
 ls -1dt "$backups"/* | tail -n +$((keep + 1)) | xargs -r rm -rf --
 # shellcheck disable=SC2012
 ls -1t "$database".pre-* | tail -n +$((keep + 1)) | xargs -r rm -f --
-echo "deploy: $sha läuft, Rücksprung in $previous"
+echo "deploy: v$version Build $build ($sha) läuft, Rücksprung in $previous"

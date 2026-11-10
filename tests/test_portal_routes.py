@@ -2,12 +2,14 @@ import base64
 import json
 import re
 import sys
+import tempfile
 import threading
 import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -269,6 +271,24 @@ class SessionTests(PortalTestCase):
         self.assertEqual(response.headers["location"], "/login")
         self.assertEqual(self.count("sessions"), 0)
         self.assertEqual(client.get("/").status_code, 303)
+
+    def test_the_build_label_shows_on_the_login_page_and_in_the_sidebar(self):
+        info = {"version": "2.3.4", "build": "417", "commit": "abc1234", "deployed_at": "2026-11-10T09:00:00Z"}
+        with tempfile.TemporaryDirectory() as directory:
+            build_file = Path(directory) / "build.json"
+            build_file.write_text(json.dumps(info), encoding="utf-8")
+            rendering = sys.modules["rendering"]
+            loaded = rendering.load_build_info(build_file)
+            self.assertEqual(loaded["label"], "v2.3.4 · Build 417 · abc1234")
+            self.assertEqual(rendering.load_build_info(Path(directory) / "missing.json")["label"], "Entwicklungsstand")
+            build_file.write_text("not json", encoding="utf-8")
+            self.assertEqual(rendering.load_build_info(build_file)["label"], "Entwicklungsstand")
+
+            with mock.patch.dict(rendering.templates.env.globals, {"build": loaded}):
+                client = self.client()
+                self.assertIn("v2.3.4 · Build 417 · abc1234", client.get("/login").text)
+                self.login(client)
+                self.assertIn("v2.3.4 · Build 417 · abc1234", client.get("/").text)
 
     def test_the_session_cookie_cannot_leave_https_or_reach_scripts(self):
         cookie = self.login(self.client()).headers["set-cookie"].lower()

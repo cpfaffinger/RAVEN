@@ -17,5 +17,6 @@
     <div class="alert error" id="passkey-error" hidden></div>
     <button type="button" class="secondary" id="passkey-login" hidden>Mit Passkey anmelden</button>
   </div>
+  <p class="build-label login-build" title="{{ 'Deployt ' ~ build.deployed_at if build.deployed_at else 'Nicht über deploy.sh ausgeliefert' }}">{{ build.label }}</p>
 </section>
 {% endblock %}

@@ -25,6 +25,9 @@ cloudflare-acme.toml
 id_rsa
 id_ed25519
 
+# Written by deploy/deploy.sh on the server; never part of the source.
+portal/build.json
+
 # Local runtime output.
 *.log
 *.bak

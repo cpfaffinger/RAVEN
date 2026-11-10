@@ -19,7 +19,7 @@ from core import (
     init_db, now_iso, token_cipher,
 )
 from auth import audit, require_user
-from rendering import render
+from rendering import BUILD_INFO, render
 from workers import (
     CHECKER_STOP, CHECKER_WAKEUP, MIRROR_STOP, MIRROR_WAKEUP, SCHEDULER_STOP, STORAGE_STOP,
     STORAGE_WAKEUP, checker_loop, discard_stale_mirror_credentials, enqueue_due_schedules,
@@ -192,7 +192,7 @@ def readiness() -> JSONResponse:
     """Dependency probe for traffic admission and monitoring."""
     ready, checks = readiness_result()
     return JSONResponse(
-        {"status": "ready" if ready else "not_ready", "service": "backup-portal", "checks": checks, "time": now_iso()},
+        {"status": "ready" if ready else "not_ready", "service": "backup-portal", "build": BUILD_INFO["label"], "checks": checks, "time": now_iso()},
         status_code=200 if ready else 503,
     )
 
