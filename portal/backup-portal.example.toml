@@ -13,8 +13,8 @@ mode = "dns-cloudflare"
 email = "admin@example.com"
 state_dir = "/var/lib/backup-portal/acme"
 lock_path = "/run/backup-portal-acme.lock"
-hook = "/opt/backup-portal/acme_dns_hook.py"
-python = "/opt/backup-portal/venv/bin/python"
+hook = "/opt/raven/acme_dns_hook.py"
+python = "/opt/raven/venv/bin/python"
 certbot = "/usr/bin/certbot"
 propagation_timeout_seconds = 7200
 poll_interval_seconds = 15
@@ -24,8 +24,8 @@ resolvers = ["1.1.1.1", "8.8.8.8"]
 path = "/var/lib/backup-portal/portal.db"
 
 [paths]
-backup_script = "/opt/backup-portal/assets/backup_job.py"
-bootstrap_script = "/opt/backup-portal/assets/bootstrap_agent.py"
+backup_script = "/opt/raven/assets/backup_job.py"
+bootstrap_script = "/opt/raven/assets/bootstrap_agent.py"
 checker_state = "/var/lib/backup-check/state.json"
 home_root = "/home"
 
@@ -33,7 +33,7 @@ home_root = "/home"
 enabled = true
 interval_minutes = 60
 timeout_seconds = 1800
-script = "/opt/backup-portal/checker/backup_check.py"
+script = "/opt/raven/checker/backup_check.py"
 config = "/etc/backup-portal/backup-check.toml"
 
 [onboarding]

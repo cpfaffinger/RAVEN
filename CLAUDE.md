@@ -33,7 +33,7 @@ Hier stehen nur **Fundorte**, keine Zugangsdaten. Die Schlüssel liegen außerha
 
   Das Script verweigert den Lauf, solange Backup-, Cleanup- oder Mirror-Läufe aktiv sind, legt
   Snapshot und `portal.db.pre-<sha>` an, prüft `/readyz` und rollt bei Fehler zurück.
-- Auf dem Server gibt es kein `sqlite3`-CLI; Abfragen über `/opt/backup-portal/venv/bin/python`.
+- Auf dem Server gibt es kein `sqlite3`-CLI; Abfragen über `/opt/raven/venv/bin/python`.
 - Mirror-Box `backupbox1` verträgt rsync nur mit `--bwlimit=8M`.
 
 ## Tests

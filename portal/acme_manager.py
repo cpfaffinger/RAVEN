@@ -131,7 +131,7 @@ def main() -> int:
     }
     atomic_json(job_path, job)
 
-    hook = Path(str(acme.get("hook", "/opt/backup-portal/acme_dns_hook.py")))
+    hook = Path(str(acme.get("hook", "/opt/raven/acme_dns_hook.py")))
     python = Path(str(acme.get("python", sys.executable)))
     timeout = int(acme.get("propagation_timeout_seconds", 7200))
     interval = int(acme.get("poll_interval_seconds", 15))
@@ -212,9 +212,9 @@ def main() -> int:
     atomic_json(job_path, job)
 
     if (changed or domain_activated) and subprocess.run(
-        ["/usr/bin/systemctl", "is-active", "--quiet", "backup-portal.service"], check=False
+        ["/usr/bin/systemctl", "is-active", "--quiet", "raven.service"], check=False
     ).returncode == 0:
-        subprocess.run(["/usr/bin/systemctl", "try-restart", "backup-portal.service"], check=False)
+        subprocess.run(["/usr/bin/systemctl", "try-restart", "raven.service"], check=False)
     return process.returncode
 
 

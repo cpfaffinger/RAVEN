@@ -8,8 +8,8 @@ Type=oneshot
 User=root
 Group=root
 Environment=BACKUP_PORTAL_CONFIG=/etc/backup-portal/config.toml
-WorkingDirectory=/opt/backup-portal
-ExecStart=/opt/backup-portal/venv/bin/python /opt/backup-portal/acme_manager.py
+WorkingDirectory=/opt/raven
+ExecStart=/opt/raven/venv/bin/python /opt/raven/acme_manager.py
 TimeoutStartSec=3h
 UMask=0077
 Nice=10

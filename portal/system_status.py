@@ -72,9 +72,9 @@ def systemd_active(unit: str) -> bool:
 
 
 MANAGED_SYSTEMD_UNITS = (
-    "backup-portal.service",
-    "backup-portal-cert-renew.timer",
-    "backup-portal-cert-renew.service",
+    "raven.service",
+    "raven-cert-renew.timer",
+    "raven-cert-renew.service",
 )
 
 

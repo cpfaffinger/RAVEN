@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/backup-portal
+WorkingDirectory=/opt/raven
 Environment=BACKUP_PORTAL_CONFIG=/etc/backup-portal/config.toml
-ExecStart=/opt/backup-portal/venv/bin/python /opt/backup-portal/run.py
+ExecStart=/opt/raven/venv/bin/python /opt/raven/run.py
 Restart=on-failure
 RestartSec=5
 UMask=0077

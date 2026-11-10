@@ -33,7 +33,7 @@ except ModuleNotFoundError:  # Python 3.10
 
 
 CONFIG_DISPLAY = "/root/backup-check.toml"
-STATUS_DISPLAY = "journalctl -u backup-portal"
+STATUS_DISPLAY = "journalctl -u raven"
 
 
 @dataclass

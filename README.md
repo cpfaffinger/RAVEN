@@ -32,8 +32,8 @@ Produktionspfade:
 
 - Backup-Agent: `/root/backup` mit `/root/backup-job.toml`
 - Checker: `/root/backup_check.py` mit `/root/backup-check.toml`
-- Portal: `/opt/backup-portal`, Konfiguration `/etc/backup-portal/config.toml`
-- Portal-Service: `backup-portal.service`
+- Portal: `/opt/raven`, Konfiguration `/etc/backup-portal/config.toml`
+- Portal-Service: `raven.service`
 
 Der Zielserver führt den Checker als überlappungsgeschützten Portal-Worker aus. Zeitplan, manuelle Checks, Dry-Runs, Force-Reports und SMTP-Prüfungen werden im Webinterface verwaltet; ein separater Checker-Cronjob ist nicht erforderlich.
 
@@ -120,7 +120,7 @@ Domain und Onboarding-Werte werden bei der Erstinstallation aus den Assistentena
 
 Nach der Abfrage erledigt das Skript automatisch:
 
-- Bereitstellung der Anwendung unter `/opt/backup-portal` in einer isolierten Python-Umgebung
+- Bereitstellung der Anwendung unter `/opt/raven` in einer isolierten Python-Umgebung
 - Erzeugung minimierter root-only TOML-Basiskonfigurationen ohne SMTP- oder Cloudflare-Zugangsdaten
 - Initialisierung bzw. Migration der eingebetteten SQLite-Datenbank
 - Anlage oder Aktualisierung des lokalen Admin-Kontos
@@ -129,7 +129,7 @@ Nach der Abfrage erledigt das Skript automatisch:
 - UFW-Freigaben, sofern UFW bereits aktiv ist; eine inaktive Firewall wird nicht ungefragt aktiviert
 - Let's-Encrypt-DNS-01 mit sichtbarem TXT-Record und Propagations-Wartephase, optional HTTP-01 oder vorhandene TLS-Dateien
 - täglichen systemd-Erneuerungstimer und Portalansicht für Zertifikat, Challenge und Certbot-Ergebnis
-- Aktivierung des gehärteten `backup-portal.service`
+- Aktivierung des gehärteten `raven.service`
 - abschließende Liveness-, Readiness-, Port- und Dienstprüfung
 
 Die SQLite-Datenbank liegt unter `/var/lib/backup-portal/portal.db`; ein externer Datenbankserver ist nicht erforderlich. Eine bestehende Datenbank wird migriert und nicht ersetzt. Vor Änderungen legt der Installer konsistente Zeitstempel-Backups von Datenbank und Konfiguration an. Bei einer erneuten Ausführung bleibt das Session-Secret erhalten; das eingegebene Admin-Passwort wird bewusst aktualisiert und vorhandene Sitzungen dieses Benutzers werden beendet.
@@ -139,8 +139,8 @@ Die SQLite-Datenbank liegt unter `/var/lib/backup-portal/portal.db`; ein externe
 Am Ende gibt der Installer Portal-URL und relevante Pfade aus. Zusätzlich können die Prüfungen manuell wiederholt werden:
 
 ```sh
-systemctl status backup-portal --no-pager
-journalctl -u backup-portal -n 100 --no-pager
+systemctl status raven --no-pager
+journalctl -u raven -n 100 --no-pager
 curl --fail https://backup.example.com:49180/livez
 curl --fail https://backup.example.com:49180/readyz
 ```
@@ -199,15 +199,15 @@ Name: _acme-challenge.backup.example.com
 Wert: <vom Installer oder Portal angezeigter ACME-Wert>
 ```
 
-Jede reguläre DNS-01-Erneuerung erzeugt einen neuen Wert. Der tägliche `backup-portal-cert-renew.timer` prüft, ob Certbot eine Erneuerung verlangt. Sobald eine neue Challenge läuft, zeigt das admin-only Menü **Einstellungen → Zertifikate** TXT-Name, TXT-Wert, Cloudflare-Status, Propagationsstatus, Resolver und Cleanup-Ergebnis. Anlage, Prüfung und Entfernung des Records laufen unbeaufsichtigt. Nach erfolgreicher Ausstellung wird das Portal neu gestartet, damit Uvicorn das rotierte Zertifikat lädt.
+Jede reguläre DNS-01-Erneuerung erzeugt einen neuen Wert. Der tägliche `raven-cert-renew.timer` prüft, ob Certbot eine Erneuerung verlangt. Sobald eine neue Challenge läuft, zeigt das admin-only Menü **Einstellungen → Zertifikate** TXT-Name, TXT-Wert, Cloudflare-Status, Propagationsstatus, Resolver und Cleanup-Ergebnis. Anlage, Prüfung und Entfernung des Records laufen unbeaufsichtigt. Nach erfolgreicher Ausstellung wird das Portal neu gestartet, damit Uvicorn das rotierte Zertifikat lädt.
 
 Existiert beim Setup bereits ein Zertifikat, kann der Assistent es unverändert übernehmen oder sofort kontrolliert per DNS-01 neu ausstellen. Im nicht-interaktiven Modus erzwingt `ACME_FORCE_REISSUE=yes` diese Migration und wartet ebenfalls auf den neuen TXT-Eintrag.
 
 Für DNS-Zonen außerhalb von Cloudflare bleibt `letsencrypt-dns-manual` verfügbar. In diesem Modus zeigt das Portal den jeweils neuen TXT-Wert an und wartet auf dessen manuelle Anlage; Ausstellung, Prüfung, Ablage und Reload laufen danach automatisch weiter.
 
 ```sh
-systemctl status backup-portal-cert-renew.timer
-journalctl -u backup-portal-cert-renew.service
+systemctl status raven-cert-renew.timer
+journalctl -u raven-cert-renew.service
 ```
 
 ## Backupzeit und Intervall
@@ -387,4 +387,4 @@ Eine laufende Installation lässt sich auch ohne `install.sh` aktualisieren. `de
 RAVEN_SSH_TARGET=root@backup.example.com RAVEN_SSH_KEY=~/.ssh/raven deploy/deploy.sh
 ```
 
-Bei einem Fehler zuerst `journalctl -u backup-portal` und `/readyz` prüfen. Eine Datenbankwiederherstellung darf nur bei gestopptem Portal erfolgen. Dabei die aktuelle Datenbank zunächst separat sichern, anschließend das gewünschte Zeitstempel-Backup nach `portal.db` kopieren, Eigentümer `root:root` und Modus `0600` setzen und den Dienst wieder starten.
+Bei einem Fehler zuerst `journalctl -u raven` und `/readyz` prüfen. Eine Datenbankwiederherstellung darf nur bei gestopptem Portal erfolgen. Dabei die aktuelle Datenbank zunächst separat sichern, anschließend das gewünschte Zeitstempel-Backup nach `portal.db` kopieren, Eigentümer `root:root` und Modus `0600` setzen und den Dienst wieder starten.

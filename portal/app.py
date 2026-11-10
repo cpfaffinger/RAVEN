@@ -170,7 +170,7 @@ def readiness_result() -> tuple[bool, dict[str, Any]]:
     checks["checker_config"] = CHECKER_CONFIG_PATH.is_file() and os.access(CHECKER_CONFIG_PATH, os.R_OK)
     checks["checker_worker"] = bool(CHECKER_THREAD and CHECKER_THREAD.is_alive())
     if ACME_CONFIG.get("mode") in {"dns-manual", "dns-cloudflare"}:
-        acme_hook = Path(ACME_CONFIG.get("hook", "/opt/backup-portal/acme_dns_hook.py"))
+        acme_hook = Path(ACME_CONFIG.get("hook", "/opt/raven/acme_dns_hook.py"))
         checks["acme_dns_hook"] = acme_hook.is_file() and os.access(acme_hook, os.R_OK)
     if ACME_CONFIG.get("mode") == "dns-cloudflare":
         try:

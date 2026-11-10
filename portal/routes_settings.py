@@ -248,9 +248,9 @@ def certificates_page(request: Request):
             "cloudflare_test": dict(cloudflare_test) if cloudflare_test else {},
             "challenges": challenges,
             "job": read_acme_state("job.json"),
-            "renewal_running": systemd_active("backup-portal-cert-renew.service"),
+            "renewal_running": systemd_active("raven-cert-renew.service"),
             "challenge_running": challenge_running,
-            "timer_active": systemd_active("backup-portal-cert-renew.timer"),
+            "timer_active": systemd_active("raven-cert-renew.timer"),
             "message": request.query_params.get("message", ""),
         },
     )
@@ -269,7 +269,7 @@ def cloudflare_credentials_update(
     verify_csrf(user, csrf_token)
     if ACME_CONFIG.get("mode") != "dns-cloudflare":
         raise HTTPException(400, "Cloudflare-DNS ist nicht aktiviert")
-    if systemd_active("backup-portal-cert-renew.service"):
+    if systemd_active("raven-cert-renew.service"):
         raise HTTPException(409, "Cloudflare-Zugangsdaten koennen waehrend einer Zertifikatsanforderung nicht geaendert werden")
     zone_id = zone_id.strip()
     if zone_id and not re.fullmatch(r"[A-Fa-f0-9]{32}", zone_id):
@@ -352,7 +352,7 @@ def certificate_request(request: Request, csrf_token: str = Form(...)):
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(now_iso() + "\n")
     process = subprocess.run(
-        ["/usr/bin/systemctl", "start", "--no-block", "backup-portal-cert-renew.service"],
+        ["/usr/bin/systemctl", "start", "--no-block", "raven-cert-renew.service"],
         capture_output=True,
         text=True,
         timeout=15,

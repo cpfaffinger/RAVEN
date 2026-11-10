@@ -9,7 +9,7 @@ fqdn="$3"
 portal_port="$4"
 version="$5"
 build="$6"
-app=/opt/backup-portal
+app=/opt/raven
 database=/var/lib/backup-portal/portal.db
 backups="$app/.deploy-backups"
 keep=5
@@ -97,12 +97,12 @@ printf '{"version": "%s", "build": "%s", "commit": "%s", "deployed_at": "%s"}\n'
 cmp -s "$stage/portal/requirements.txt" "$app/requirements.txt" \
     || "$app/venv/bin/pip" install -q -r "$stage/portal/requirements.txt"
 install_tree "$stage"
-systemctl restart backup-portal
+systemctl restart raven
 
 if ! wait_ready; then
     echo "deploy: /readyz antwortet nicht, setze den vorherigen Stand zurück" >&2
     install_tree "$previous"
-    systemctl restart backup-portal
+    systemctl restart raven
     wait_ready || die "Auch der vorherige Stand startet nicht"
     die "Stand $sha zurückgerollt"
 fi

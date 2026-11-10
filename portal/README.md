@@ -25,12 +25,12 @@ Ein bereits onboardeter Server lässt sich über dieselbe Stelle erneut deployen
 ## Betrieb
 
 ```sh
-systemctl status backup-portal
-journalctl -u backup-portal
-systemctl restart backup-portal
+systemctl status raven
+journalctl -u raven
+systemctl restart raven
 ```
 
-Domain und Onboarding-Basiswerte werden in SQLite verwaltet und stehen admin-only unter **Einstellungen → Portal** bereit; die TOML liefert nur Bootstrap-Defaults und bootkritische Listener-, TLS-, Pfad- und Secret-Werte. Basisdomain und optionale Subdomain bestimmen gemeinsam Portal-URL, Curl-Onboarding, Agent-Endpunkte, SSH-Ziel, Trusted Hosts und Zertifikatsnamen. Domainwechsel bleiben vorgemerkt, bis das neue Zertifikat erfolgreich ausgestellt wurde. Im Modus `dns-cloudflare` legt der Certbot-Auth-Hook den erforderlichen DNS-01-TXT-Record per Cloudflare API an, persistiert den Status für das admin-only Menü **Einstellungen → Zertifikate**, wartet auf öffentliche Propagation und löscht exakt die erzeugte Record-ID nach der Validierung. Token, Zone-ID und TTL werden im Webinterface verwaltet und verschlüsselt in SQLite gespeichert; der Token-/Zone-Lesetest kann dort ohne DNS-Änderung ausgelöst werden. Eine vorhandene Legacy-Credentials-Datei wird einmalig importiert und anschließend entfernt. `backup-portal-cert-renew.timer` prüft täglich auf erforderliche Erneuerungen. Nach einer Ausstellung wird der Portalprozess neu gestartet und lädt das rotierte Zertifikat. `dns-manual` bleibt als Provider-unabhängiger Fallback erhalten.
+Domain und Onboarding-Basiswerte werden in SQLite verwaltet und stehen admin-only unter **Einstellungen → Portal** bereit; die TOML liefert nur Bootstrap-Defaults und bootkritische Listener-, TLS-, Pfad- und Secret-Werte. Basisdomain und optionale Subdomain bestimmen gemeinsam Portal-URL, Curl-Onboarding, Agent-Endpunkte, SSH-Ziel, Trusted Hosts und Zertifikatsnamen. Domainwechsel bleiben vorgemerkt, bis das neue Zertifikat erfolgreich ausgestellt wurde. Im Modus `dns-cloudflare` legt der Certbot-Auth-Hook den erforderlichen DNS-01-TXT-Record per Cloudflare API an, persistiert den Status für das admin-only Menü **Einstellungen → Zertifikate**, wartet auf öffentliche Propagation und löscht exakt die erzeugte Record-ID nach der Validierung. Token, Zone-ID und TTL werden im Webinterface verwaltet und verschlüsselt in SQLite gespeichert; der Token-/Zone-Lesetest kann dort ohne DNS-Änderung ausgelöst werden. Eine vorhandene Legacy-Credentials-Datei wird einmalig importiert und anschließend entfernt. `raven-cert-renew.timer` prüft täglich auf erforderliche Erneuerungen. Nach einer Ausstellung wird der Portalprozess neu gestartet und lädt das rotierte Zertifikat. `dns-manual` bleibt als Provider-unabhängiger Fallback erhalten.
 
 SMTP wird nach der Erstinitialisierung zentral aus der SQLite-Tabelle `smtp_settings` gelesen. Das Passwort liegt dort mit dem Portal-Master-Secret verschlüsselt. Änderungen erfolgen admin-only unter **Einstellungen → SMTP** und erhöhen die Agent-Konfigurationsversion. Checker und Agent verwenden ausschließlich Plain-SMTP; STARTTLS und SMTPS werden nicht aufgerufen.
 
@@ -48,13 +48,13 @@ Die Übersicht weist den gesamten, belegten und freien Platz des Backup-Zieldate
 
 ## Relevante Dateien
 
-- `/opt/backup-portal`: Anwendung und Bootstrap-/Agent-Assets
-- `/opt/backup-portal/checker/backup_check.py`: vom Portal verwalteter Checker
-- `/opt/backup-portal/acme_{manager,dns_hook}.py`: DNS-01-Anforderung, Status und Propagationsprüfung
+- `/opt/raven`: Anwendung und Bootstrap-/Agent-Assets
+- `/opt/raven/checker/backup_check.py`: vom Portal verwalteter Checker
+- `/opt/raven/acme_{manager,dns_hook}.py`: DNS-01-Anforderung, Status und Propagationsprüfung
 - `/etc/backup-portal/backup-check.toml`: root-only Checker-Basiskonfiguration ohne SMTP-Secret, Modus `0600`
 - `/etc/backup-portal/config.toml`: root-only Portal-Basiskonfiguration und internes Master-Secret, Modus `0600`
 - `/var/lib/backup-portal/portal.db`: Benutzer, Tokens, Audit- und Agentereignisse, Modus `0600`
-- `/etc/systemd/system/backup-portal.service`: systemd-Dienst
-- `/etc/letsencrypt/renewal-hooks/deploy/restart-backup-portal`: TLS-Renewal-Hook
+- `/etc/systemd/system/raven.service`: systemd-Dienst
+- `/etc/letsencrypt/renewal-hooks/deploy/restart-raven`: TLS-Renewal-Hook
 - `/var/lib/backup-portal/acme`: root-only Challenge- und Laufstatus
-- `/etc/systemd/system/backup-portal-cert-renew.{service,timer}`: DNS-01-Erneuerung
+- `/etc/systemd/system/raven-cert-renew.{service,timer}`: DNS-01-Erneuerung

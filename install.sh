@@ -5,18 +5,18 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-readonly APP_NAME="backup-portal"
-readonly APP_DIR="/opt/backup-portal"
+readonly APP_NAME="raven"
+readonly APP_DIR="/opt/raven"
 readonly CONFIG_DIR="/etc/backup-portal"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.toml"
 readonly CHECKER_CONFIG_FILE="${CONFIG_DIR}/backup-check.toml"
 readonly DATA_DIR="/var/lib/backup-portal"
 readonly CHECKER_DATA_DIR="/var/lib/backup-check"
-readonly SERVICE_FILE="/etc/systemd/system/backup-portal.service"
-readonly CERT_RENEW_SERVICE_FILE="/etc/systemd/system/backup-portal-cert-renew.service"
-readonly CERT_RENEW_TIMER_FILE="/etc/systemd/system/backup-portal-cert-renew.timer"
+readonly SERVICE_FILE="/etc/systemd/system/raven.service"
+readonly CERT_RENEW_SERVICE_FILE="/etc/systemd/system/raven-cert-renew.service"
+readonly CERT_RENEW_TIMER_FILE="/etc/systemd/system/raven-cert-renew.timer"
 readonly SSH_DROPIN="/etc/ssh/sshd_config.d/90-backup-portal-port.conf"
-readonly CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/restart-backup-portal"
+readonly CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/restart-raven"
 readonly ACME_STATE_DIR="/var/lib/backup-portal/acme"
 readonly CLOUDFLARE_CREDENTIALS_FILE="/etc/backup-portal/cloudflare-acme.toml"
 
@@ -132,7 +132,7 @@ require_project_files() {
         "portal/routes_agent_api.py"
         "portal/run.py"
         "portal/requirements.txt"
-        "portal/backup-portal.service"
+        "portal/raven.service"
         "portal/certbot-deploy-hook.sh"
         "portal/acme_dns_hook.py"
         "portal/acme_manager.py"
@@ -141,8 +141,8 @@ require_project_files() {
         "portal/backup_schedule.py"
         "portal/mirror.py"
         "portal/webauthn.py"
-        "portal/backup-portal-cert-renew.service"
-        "portal/backup-portal-cert-renew.timer"
+        "portal/raven-cert-renew.service"
+        "portal/raven-cert-renew.timer"
         "portal/README.md"
         "portal/assets/bootstrap_agent.py"
         "backupscript/backup_job.py"
@@ -1016,9 +1016,9 @@ install_configuration_and_service() {
     chown root:root "${CHECKER_DATA_DIR}/state.json"
     chmod 0600 "${CHECKER_DATA_DIR}/state.json"
 
-    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/backup-portal.service" "$SERVICE_FILE"
-    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/backup-portal-cert-renew.service" "$CERT_RENEW_SERVICE_FILE"
-    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/backup-portal-cert-renew.timer" "$CERT_RENEW_TIMER_FILE"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/raven.service" "$SERVICE_FILE"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/raven-cert-renew.service" "$CERT_RENEW_SERVICE_FILE"
+    install -o root -g root -m 0644 "${PROJECT_ROOT}/portal/raven-cert-renew.timer" "$CERT_RENEW_TIMER_FILE"
     install -d -o root -g root -m 0755 "$(dirname "$CERTBOT_HOOK")"
     install -o root -g root -m 0755 "${PROJECT_ROOT}/portal/certbot-deploy-hook.sh" "$CERTBOT_HOOK"
     systemctl daemon-reload
@@ -1122,10 +1122,10 @@ start_and_verify() {
     systemctl is-active --quiet "${APP_NAME}.service" || die "Portal-Dienst ist nicht aktiv."
     port_is_listening "$PORTAL_PORT" || die "Portal lauscht nicht auf Port ${PORTAL_PORT}."
     if [[ ${TLS_MODE,,} == "letsencrypt-dns-cloudflare" || ${TLS_MODE,,} == "letsencrypt-dns-manual" || ${TLS_MODE,,} == "letsencrypt-dns" ]]; then
-        systemctl enable --now backup-portal-cert-renew.timer
-        systemctl is-active --quiet backup-portal-cert-renew.timer || die "ACME-Erneuerungstimer ist nicht aktiv."
+        systemctl enable --now raven-cert-renew.timer
+        systemctl is-active --quiet raven-cert-renew.timer || die "ACME-Erneuerungstimer ist nicht aktiv."
     else
-        systemctl disable --now backup-portal-cert-renew.timer 2>/dev/null || true
+        systemctl disable --now raven-cert-renew.timer 2>/dev/null || true
     fi
 }
 
@@ -1136,8 +1136,8 @@ Installation erfolgreich abgeschlossen.
 
   Portal:          https://${PORTAL_FQDN}:${PORTAL_PORT}
   Admin:           ${ADMIN_USERNAME}
-  Portal-Service:  systemctl status backup-portal
-  Portal-Log:      journalctl -u backup-portal
+  Portal-Service:  systemctl status raven
+  Portal-Log:      journalctl -u raven
   Zertifikate:     https://${PORTAL_FQDN}:${PORTAL_PORT}/certificates
   ACME-Timer:      $(if [[ ${TLS_MODE,,} == letsencrypt-dns-* || ${TLS_MODE,,} == "letsencrypt-dns" ]]; then echo aktiv; else echo inaktiv; fi)
   SSH-Backup-Port: ${BACKUP_SSH_PORT}/tcp
