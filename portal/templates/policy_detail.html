@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ policy.name }} · RAVEN{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/policies">Policies</a><span class="sep">/</span><span class="current">Policy #{{ policy.id }}</span></p><h1>{{ policy.name }}</h1><p class="muted">{{ clients|length }} zugewiesene Server · Änderungen gelten für neu gequeuete Aufträge.</p></div></div>
+<div class="page-head"><div><p class="eyebrow breadcrumb"><a href="/policies">Policies</a><span class="sep">/</span><span class="current">Policy #{{ policy.id }}</span></p><h1>{{ policy.name }}{% if policy.is_default %} <span class="status ok">STANDARD</span>{% endif %}</h1><p class="muted">{{ clients|length }} zugewiesene Server · Änderungen gelten für neu gequeuete Aufträge.</p></div>{% if user.role == 'admin' and policy.active and not policy.is_default %}<form method="post" action="/policies/{{ policy.id }}/default"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary" title="Wird beim Onboarding neuer Server vorausgewählt">Als Standard festlegen</button></form>{% endif %}</div>
 {% if message %}<div class="callout"><strong>{{ message }}</strong></div>{% endif %}
 {% if user.role == 'admin' %}
 <section class="panel">
@@ -57,5 +57,5 @@
   </form>
 </section>
 {% endif %}
-{% if user.role == 'admin' %}<section class="panel danger-zone"><div><p class="eyebrow">Gefahrenbereich</p><h2>Policy löschen</h2>{% if clients %}<p class="muted">Diese Policy kann erst gelöscht werden, wenn alle {{ clients|length }} zugewiesenen Server eine andere Policy verwenden.</p>{% else %}<p class="muted">Die Policy und ihre Pfadregeln werden dauerhaft gelöscht. Historische Policy-Snapshots in Backup-Aufträgen bleiben erhalten.</p>{% endif %}</div>{% if not clients %}<form method="post" action="/policies/{{ policy.id }}/delete" data-confirm="Policy „{{ policy.name }}“ wirklich dauerhaft löschen?"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Unzugewiesene Policy löschen</button></form>{% endif %}</section>{% endif %}
+{% if user.role == 'admin' %}<section class="panel danger-zone"><div><p class="eyebrow">Gefahrenbereich</p><h2>Policy löschen</h2>{% if policy.is_default %}<p class="muted">Dies ist die Standard-Policy für neue Server. Sie kann erst gelöscht werden, nachdem eine andere Policy als Standard festgelegt wurde.</p>{% elif clients %}<p class="muted">Diese Policy kann erst gelöscht werden, wenn alle {{ clients|length }} zugewiesenen Server eine andere Policy verwenden.</p>{% else %}<p class="muted">Die Policy und ihre Pfadregeln werden dauerhaft gelöscht. Historische Policy-Snapshots in Backup-Aufträgen bleiben erhalten.</p>{% endif %}</div>{% if not clients and not policy.is_default %}<form method="post" action="/policies/{{ policy.id }}/delete" data-confirm="Policy „{{ policy.name }}“ wirklich dauerhaft löschen?"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Unzugewiesene Policy löschen</button></form>{% endif %}</section>{% endif %}
 {% endblock %}

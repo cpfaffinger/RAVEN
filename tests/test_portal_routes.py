@@ -1040,6 +1040,69 @@ class PolicyUpdateTests(AgentTestCase):
         self.assertEqual(config["schedule"], {"hour": 3, "minute": 15, "interval_hours": 12})
 
 
+class DefaultPolicyTests(PortalTestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin = self.session("admin")
+        self.seeded = self.default_policy_id()
+        # Sorts before "Standard Zstd Archive", which used to win the preselection.
+        self.alphabetical_first = self.add_policy("Aaa Webserver")
+
+    def defaults(self):
+        return [row["id"] for row in self.rows("SELECT id FROM backup_policies WHERE is_default=1")]
+
+    def selected_option(self):
+        match = re.search(r'<option value="(\d+)"\s+selected', self.admin.get("/clients/new").text)
+        return int(match.group(1)) if match else None
+
+    def test_the_seeded_policy_is_the_default(self):
+        self.assertEqual(self.defaults(), [self.seeded])
+
+    def test_an_installation_without_the_flag_keeps_its_old_preselection(self):
+        self.execute("DROP INDEX idx_backup_policies_default")
+        self.execute("ALTER TABLE backup_policies DROP COLUMN is_default")
+        core.init_db()
+        self.assertEqual(self.defaults(), [self.alphabetical_first])
+
+    def test_onboarding_preselects_the_default_and_not_the_first_by_name(self):
+        self.assertEqual(self.selected_option(), self.seeded)
+
+    def test_choosing_another_default_moves_the_flag_and_the_preselection(self):
+        response = self.admin.submit(f"/policies/{self.alphabetical_first}/default")
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.defaults(), [self.alphabetical_first])
+        self.assertEqual(self.selected_option(), self.alphabetical_first)
+
+    def test_a_server_onboarded_with_the_preselection_gets_the_default(self):
+        self.admin.submit(f"/policies/{self.alphabetical_first}/default")
+        self.admin.submit("/clients/new", slug="bravo", policy_id=self.selected_option())
+        self.assertEqual(
+            self.row("SELECT policy_id FROM clients WHERE slug='bravo'")["policy_id"], self.alphabetical_first
+        )
+
+    def test_an_inactive_or_unknown_policy_cannot_become_the_default(self):
+        inactive = self.add_policy("Inaktiv", active=0)
+        self.assertEqual(self.admin.submit(f"/policies/{inactive}/default").status_code, 400)
+        self.assertEqual(self.admin.submit("/policies/999/default").status_code, 404)
+        self.assertEqual(self.defaults(), [self.seeded])
+
+    def test_the_default_policy_cannot_be_deleted_until_another_one_is_chosen(self):
+        self.assertEqual(self.admin.submit(f"/policies/{self.seeded}/delete").status_code, 409)
+        self.assertEqual(self.count("backup_policies", "id=?", self.seeded), 1)
+        self.admin.submit(f"/policies/{self.alphabetical_first}/default")
+        self.assertEqual(self.admin.submit(f"/policies/{self.seeded}/delete").status_code, 303)
+        self.assertEqual(self.defaults(), [self.alphabetical_first])
+
+    def test_a_copy_of_the_default_is_not_a_second_default(self):
+        self.admin.submit(f"/policies/{self.seeded}/duplicate", name="Kopie der Standard-Policy")
+        self.assertEqual(self.defaults(), [self.seeded])
+
+    def test_the_pages_show_which_policy_is_the_default(self):
+        self.assertIn("Standard für neue Server", self.admin.get("/policies").text)
+        self.assertNotIn("Als Standard festlegen", self.admin.get(f"/policies/{self.seeded}").text)
+        self.assertIn("Als Standard festlegen", self.admin.get(f"/policies/{self.alphabetical_first}").text)
+
+
 class MirrorScheduleTestCase(PortalTestCase):
     def retry(self, target_id):
         with closing(core.db()) as connection, connection:

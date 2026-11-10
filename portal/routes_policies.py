@@ -303,6 +303,27 @@ def policy_duplicate(
     return RedirectResponse(f"/policies/{new_id}?message={quote(message)}", status_code=303)
 
 
+@router.post("/policies/{policy_id}/default")
+def policy_set_default(request: Request, policy_id: int, csrf_token: str = Form(...)):
+    """Make a policy the one preselected when a new server is onboarded."""
+    user = require_user(request, admin=True)
+    verify_csrf(user, csrf_token)
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        policy = connection.execute(
+            "SELECT name,active FROM backup_policies WHERE id=?", (policy_id,)
+        ).fetchone()
+        if not policy:
+            raise HTTPException(404)
+        if not policy["active"]:
+            raise HTTPException(400, "Eine inaktive Policy kann nicht Standard sein")
+        connection.execute("UPDATE backup_policies SET is_default=0 WHERE is_default=1 AND id<>?", (policy_id,))
+        connection.execute("UPDATE backup_policies SET is_default=1 WHERE id=?", (policy_id,))
+    audit(request, "policy.set_default", str(policy["name"]), f"policy_id={policy_id}", user_id=user["id"])
+    message = f"„{policy['name']}“ ist jetzt die Standard-Policy für neue Server"
+    return RedirectResponse(f"/policies/{policy_id}?message={quote(message)}", status_code=303)
+
+
 @router.post("/policies/{policy_id}/delete")
 def policy_delete(request: Request, policy_id: int, csrf_token: str = Form(...)):
     user = require_user(request, admin=True)
@@ -313,10 +334,15 @@ def policy_delete(request: Request, policy_id: int, csrf_token: str = Form(...))
             # update cannot attach the policy between the check and the delete.
             connection.execute("BEGIN IMMEDIATE")
             policy = connection.execute(
-                "SELECT name FROM backup_policies WHERE id=?", (policy_id,)
+                "SELECT name,is_default FROM backup_policies WHERE id=?", (policy_id,)
             ).fetchone()
             if not policy:
                 raise HTTPException(404)
+            if policy["is_default"]:
+                raise HTTPException(
+                    409,
+                    "Die Standard-Policy kann nicht geloescht werden; zuerst eine andere Policy als Standard festlegen",
+                )
             client_count = connection.execute(
                 "SELECT COUNT(*) FROM clients WHERE policy_id=?", (policy_id,)
             ).fetchone()[0]

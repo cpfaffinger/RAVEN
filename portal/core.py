@@ -337,6 +337,7 @@ def init_db() -> None:
               retention_days INTEGER NOT NULL DEFAULT 7,
               minimum_snapshots_to_keep INTEGER NOT NULL DEFAULT 2,
               active INTEGER NOT NULL DEFAULT 1,
+              is_default INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS policy_paths (
@@ -587,6 +588,18 @@ def init_db() -> None:
         # policy starts with it enabled (the column default).
         if "crontab_enabled" not in policy_columns:
             connection.execute("ALTER TABLE backup_policies ADD COLUMN crontab_enabled INTEGER NOT NULL DEFAULT 1")
+        # The policy preselected when onboarding a server. Until now that was
+        # simply the alphabetically first one, so existing installations keep it.
+        if "is_default" not in policy_columns:
+            connection.execute("ALTER TABLE backup_policies ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+            connection.execute(
+                "UPDATE backup_policies SET is_default=1 WHERE id="
+                "(SELECT id FROM backup_policies WHERE active=1 ORDER BY name LIMIT 1)"
+            )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_backup_policies_default "
+            "ON backup_policies(is_default) WHERE is_default=1"
+        )
         migrate_policy_schedule(connection, policy_columns, client_columns, portal_defaults)
         migrate_policy_notifications(connection, policy_columns, client_columns)
         cleanup_defaults = checker_cleanup_configuration()
@@ -645,6 +658,8 @@ def init_db() -> None:
                     "UPDATE backup_policies SET name='Standard Zstd Archive',description=?,updated_at=? WHERE id=?",
                     ("Standard-Policy: /etc und /home als persistente Tar.Zstd-Archive, MariaDB aktiviert.", now_iso(), default_policy_id),
                 )
+        if not connection.execute("SELECT 1 FROM backup_policies WHERE is_default=1").fetchone():
+            connection.execute("UPDATE backup_policies SET is_default=1 WHERE id=?", (default_policy_id,))
         connection.execute("UPDATE clients SET policy_id=? WHERE policy_id IS NULL", (default_policy_id,))
         migrated_policy_ids = [
             row[0] for row in connection.execute("SELECT DISTINCT policy_id FROM policy_paths WHERE mode='snapshot'")

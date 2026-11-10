@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -35,14 +36,22 @@ def active_policies() -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def onboarding_context(error: str = "", settings: Any = None) -> dict[str, Any]:
+    """Template values of the onboarding form, with the default policy preselected."""
+    policies = active_policies()
+    default = next((policy["id"] for policy in policies if policy["is_default"]), None)
+    return {
+        "error": error,
+        "defaults": settings or application_settings(),
+        "policies": policies,
+        "default_policy_id": default,
+    }
+
+
 @router.get("/clients/new", response_class=HTMLResponse)
 def client_new_page(request: Request):
     require_user(request, admin=True)
-    return render(
-        request,
-        "client_new.html",
-        {"error": "", "defaults": application_settings(), "policies": active_policies()},
-    )
+    return render(request, "client_new.html", onboarding_context())
 
 
 def provision_system_user(username: str, home: Path) -> None:
@@ -86,9 +95,9 @@ def client_create(
     slug = slug.strip().lower()
     source_hostname = source_hostname.strip()
     if not USERNAME_RE.fullmatch(slug):
-        return render(request, "client_new.html", {"error": "Slug muss 2–24 sichere Kleinbuchstaben/Ziffern enthalten.", "defaults": settings, "policies": active_policies()}, 400)
+        return render(request, "client_new.html", onboarding_context("Slug muss 2–24 sichere Kleinbuchstaben/Ziffern enthalten.", settings), 400)
     if source_hostname and not HOST_RE.fullmatch(source_hostname):
-        return render(request, "client_new.html", {"error": "Quellhostname ist ungueltig.", "defaults": settings, "policies": active_policies()}, 400)
+        return render(request, "client_new.html", onboarding_context("Quellhostname ist ungueltig.", settings), 400)
     agent_log_level = agent_log_level.upper().strip()
     if agent_log_level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
         raise HTTPException(400, "Ungueltiger Agent-Loglevel")

@@ -11,7 +11,7 @@
   <div class="form-grid">
     <label>Server-Slug<small>z. B. example-web3</small><input name="slug" pattern="[a-z][a-z0-9_-]{1,23}" required></label>
     <label>Erwarteter Hostname<small>Optional, wird beim Agentenlauf verifiziert</small><input name="source_hostname" placeholder="web3.example.com"></label>
-    <label>Backup-Policy<small>Genau eine Policy wird diesem Server zugewiesen; sie bestimmt auch Wunschzeit und Intervall.</small><select name="policy_id" required>{% for policy in policies %}<option value="{{ policy.id }}">{{ policy.name }}</option>{% endfor %}</select></label>
+    <label>Backup-Policy<small>Genau eine Policy wird diesem Server zugewiesen; sie bestimmt auch Wunschzeit und Intervall.</small><select name="policy_id" required>{% for policy in policies %}<option value="{{ policy.id }}" {% if policy.id == default_policy_id %}selected{% endif %}>{{ policy.name }}{% if policy.id == default_policy_id %} (Standard){% endif %}</option>{% endfor %}</select></label>
     <label>Agent-Loglevel<small>INFO ist für den Betrieb empfohlen.</small><select name="agent_log_level"><option>DEBUG</option><option selected>INFO</option><option>WARNING</option><option>ERROR</option></select></label>
     <label>Maximales Portallog<small>16–512 KB pro Backup-Lauf</small><input type="number" name="agent_log_max_kb" min="16" max="512" value="256" required></label>
   </div>
