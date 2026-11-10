@@ -240,8 +240,12 @@
 .cleanup-execute { display: grid; gap: .4rem; }
 .cleanup-execute .inline-check { font-size: .8rem; }
 
-@media (min-width: 1100px) {
-  .dashboard-table { min-width: 0; }
-  .dashboard-table th, .dashboard-table td { padding: 12px 14px; }
-  .dashboard-table td { overflow-wrap: anywhere; }
-}
+/* Dashboard table: never break inside words; wrap only at spaces, scroll sideways when too narrow. */
+.dashboard-table { min-width: 1240px; }
+.dashboard-table th, .dashboard-table td { padding: 12px 14px; overflow-wrap: normal; word-break: normal; }
+.dashboard-table th { white-space: nowrap; }
+.dashboard-table .nowrap, .dashboard-table .status { white-space: nowrap; }
+.dashboard-table .col-server { min-width: 190px; }
+.dashboard-table .col-server small { overflow-wrap: anywhere; }
+.dashboard-table .col-actions a { display: block; }
+.dashboard-table td small { line-height: 1.35; }

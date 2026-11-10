@@ -12,7 +12,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from core import (
-    HOME_ROOT, agent_script_asset, db, format_size, parsed_timestamp, system_account_exists,
+    HOME_ROOT, agent_script_asset, db, format_size, format_stamp, parsed_timestamp, system_account_exists,
 )
 from auth import audit, require_user, verify_csrf
 from rendering import checker_results, render
@@ -291,7 +291,7 @@ def dashboard(
         if client.get("storage_error"):
             client["storage_hint"] = f"Messfehler: {client['storage_error']}"
         elif client.get("storage_checked_at"):
-            client["storage_hint"] = f"Gesamtes Backup-Home · Stand {client['storage_checked_at']}"
+            client["storage_hint"] = f"Backup-Home · Stand {format_stamp(client['storage_checked_at'])}"
         else:
             client["storage_hint"] = "Messung läuft im Hintergrund"
         client["retention"] = (

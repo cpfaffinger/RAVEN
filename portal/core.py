@@ -947,6 +947,14 @@ def parsed_timestamp(value: str | None) -> datetime | None:
         return None
 
 
+def format_stamp(value: str | None) -> str:
+    """Compact local display of an ISO timestamp: 10.11.2026 02:01."""
+    parsed = parsed_timestamp(value)
+    if parsed is None:
+        return str(value) if value else "–"
+    return parsed.astimezone().strftime("%d.%m.%Y %H:%M")
+
+
 def system_account_exists(username: str) -> bool:
     try:
         pwd.getpwnam(str(username))
