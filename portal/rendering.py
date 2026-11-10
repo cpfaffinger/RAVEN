@@ -12,12 +12,27 @@ from fastapi.templating import Jinja2Templates
 
 import backup_schedule
 
-from core import BASE_DIR, CHECKER_STATE, format_size
+from core import BASE_DIR, CHECKER_STATE, format_size, format_stamp
 from auth import session_user
 
 
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+templates.env.filters["stamp"] = format_stamp
 templates.env.filters["size"] = lambda value: format_size(value) if value is not None else "–"
+
+STATIC_DIR = BASE_DIR / "static"
+
+
+def asset(path: str) -> str:
+    """Static URL with a cache-busting id derived from the file's mtime and size."""
+    try:
+        stat = (STATIC_DIR / path).stat()
+    except OSError:
+        return f"/static/{path}"
+    return f"/static/{path}?v={int(stat.st_mtime):x}{stat.st_size:x}"
+
+
+templates.env.globals["asset"] = asset
 
 NAV_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("explorer", ("/explorer",)),

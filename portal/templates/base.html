@@ -4,17 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{% block title %}RAVEN{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
-  <link rel="stylesheet" href="/static/layout.css">
-  <link rel="stylesheet" href="/static/deploy.css">
-  <link rel="stylesheet" href="/static/manual.css">
-  <link rel="stylesheet" href="/static/explorer.css">
-  <link rel="stylesheet" href="/static/checker.css">
-  <link rel="stylesheet" href="/static/agent-logs.css">
-  <link rel="stylesheet" href="/static/certificates.css">
-  <script defer src="/static/onboarding.js"></script>
-  <script defer src="/static/live-output.js"></script>
-  <script defer src="/static/passkeys.js"></script>
+  <link rel="stylesheet" href="{{ asset('app.css') }}">
+  <link rel="stylesheet" href="{{ asset('layout.css') }}">
+  <link rel="stylesheet" href="{{ asset('deploy.css') }}">
+  <link rel="stylesheet" href="{{ asset('manual.css') }}">
+  <link rel="stylesheet" href="{{ asset('explorer.css') }}">
+  <link rel="stylesheet" href="{{ asset('checker.css') }}">
+  <link rel="stylesheet" href="{{ asset('agent-logs.css') }}">
+  <link rel="stylesheet" href="{{ asset('certificates.css') }}">
+  <script defer src="{{ asset('onboarding.js') }}"></script>
+  <script defer src="{{ asset('live-output.js') }}"></script>
+  <script defer src="{{ asset('passkeys.js') }}"></script>
 </head>
 <body class="{% block body_class %}{% endblock %}{% if user %} has-sidebar{% endif %}">
 {% if user %}
