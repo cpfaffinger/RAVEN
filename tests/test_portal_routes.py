@@ -1084,6 +1084,13 @@ class DefaultPolicyTests(PortalTestCase):
         core.init_db()
         self.assertEqual(self.defaults(), [self.alphabetical_first])
 
+    def test_renaming_the_seeded_policy_does_not_recreate_it_on_restart(self):
+        self.execute("UPDATE backup_policies SET name='Standard Backup' WHERE id=?", self.seeded)
+        core.init_db()
+        core.init_db()
+        self.assertEqual(self.rows("SELECT id FROM backup_policies WHERE name='Standard Zstd Archive'"), [])
+        self.assertEqual(self.defaults(), [self.seeded])
+
     def test_onboarding_preselects_the_default_and_not_the_first_by_name(self):
         self.assertEqual(self.selected_option(), self.seeded)
 

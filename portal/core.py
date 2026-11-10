@@ -626,7 +626,15 @@ def init_db() -> None:
             "SELECT id,name FROM backup_policies WHERE name IN ('Standard Zstd Archive','Standard Snapshot') "
             "ORDER BY (name='Standard Zstd Archive') DESC LIMIT 1"
         ).fetchone()
-        if not default_policy:
+        # Seed the starter policy only into an empty installation. Once an admin
+        # renamed or replaced it, recreating it on every restart would leave an
+        # unused duplicate behind.
+        existing_policy = None if default_policy else connection.execute(
+            "SELECT id FROM backup_policies ORDER BY is_default DESC,active DESC,id LIMIT 1"
+        ).fetchone()
+        if existing_policy:
+            default_policy_id = existing_policy["id"]
+        elif not default_policy:
             cursor = connection.execute(
                 "INSERT INTO backup_policies(name,description,mariadb_enabled,schedule_hour,schedule_minute,"
                 "interval_hours,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
