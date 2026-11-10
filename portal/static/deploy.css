@@ -248,4 +248,8 @@
 .dashboard-table .col-server { min-width: 190px; }
 .dashboard-table .col-server small { overflow-wrap: anywhere; }
 .dashboard-table .col-actions a { display: block; }
+.dashboard-table .col-type { text-align: center; }
+.mode-icon { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; color: var(--muted, currentColor); cursor: help; }
+.mode-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.mode-icon.mode-none, .mode-icon.mode-account { color: var(--warn, currentColor); }
 .dashboard-table td small { line-height: 1.35; }

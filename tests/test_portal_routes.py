@@ -126,6 +126,13 @@ class RoleTests(PortalTestCase):
             with self.subTest(path):
                 self.assertEqual(self.viewer.get(path).status_code, 200)
 
+    def test_the_dashboard_links_into_the_explorer_for_admins_only(self):
+        link = f'href="/clients/{self.agent.id}/explorer"'
+        admin_page = self.admin.get("/").text
+        self.assertIn(link, admin_page)
+        self.assertIn('class="mode-icon', admin_page)
+        self.assertNotIn(link, self.viewer.get("/").text)
+
     def test_every_other_page_is_forbidden_for_a_viewer(self):
         for route in routes("GET"):
             if route.path in PAGES_FOR_EVERY_USER | PUBLIC_PAGES or route.path == "/bootstrap":
